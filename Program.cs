@@ -4,6 +4,7 @@ using Discord.WebSocket;
 using Discord.Interactions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace DiscordBot;
 
@@ -37,9 +38,12 @@ class Program
             .AddSingleton(x => new InteractionService(x.GetRequiredService<DiscordSocketClient>()))
             .AddSingleton<ThunderstoreAPI>()
             .AddSingleton<Chunking>()
+            .AddSingleton(new ThunderstoreCache(TimeSpan.FromHours(1))) // register
             .BuildServiceProvider();
 
         _interactions = _services.GetRequiredService<InteractionService>();
+        
+        _services.GetRequiredService<ThunderstoreCache>().Start();
     }
 
     public async Task MainAsync()

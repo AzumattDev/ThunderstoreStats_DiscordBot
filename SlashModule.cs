@@ -78,13 +78,14 @@ public class ThunderstoreSlash : AppModuleBase
             m.Components = comps;
         });
     }
-    
-    
+
+
     [SlashCommand("changelog", "Display a package CHANGELOG with pagination.")]
     public async Task Changelog(
         [Autocomplete(typeof(AuthorAutocomplete))] [Summary("author", "Author/owner")]
         string author,
-        [Summary("name", "Package name")] string name,
+        [Autocomplete(typeof(PackageAutocomplete))] [Summary("name", "Package name")]
+        string name,
         [Autocomplete(typeof(VersionAutocomplete))] [Summary("version", "Exact version (optional)")]
         string version = "",
         [Summary("ephemeral", "Only you can see the response")]
@@ -118,7 +119,7 @@ public class ThunderstoreSlash : AppModuleBase
         else
             await RespondAsync(embed: embeds[0], components: comps);
     }
-    
+
 
     public enum ReadmeFormat
     {
@@ -130,7 +131,8 @@ public class ThunderstoreSlash : AppModuleBase
     public async Task ReadmeFile(
         [Autocomplete(typeof(AuthorAutocomplete))] [Summary("author", "Author/owner")]
         string author,
-        [Summary("name", "Package name")] string name,
+        [Autocomplete(typeof(PackageAutocomplete))] [Summary("name", "Package name")]
+        string name,
         [Autocomplete(typeof(VersionAutocomplete))] [Summary("version", "Exact version")]
         string version = "",
         [Summary("format", "md or txt")] ReadmeFormat format = ReadmeFormat.md,
@@ -161,7 +163,8 @@ public class ThunderstoreSlash : AppModuleBase
     public async Task ReadmeSearchCmd(
         [Autocomplete(typeof(AuthorAutocomplete))] [Summary("author", "Author/owner")]
         string author,
-        [Summary("name", "Package name")] string name,
+        [Autocomplete(typeof(PackageAutocomplete))] [Summary("name", "Package name")]
+        string name,
         [Summary("query", "Text to find in README")]
         string query,
         [Autocomplete(typeof(VersionAutocomplete))] [Summary("version", "Exact version (optional)")]
@@ -195,7 +198,6 @@ public class ThunderstoreSlash : AppModuleBase
         }
 
 
-        
         var header = $"**{author}/{name}** — {(string.IsNullOrWhiteSpace(version) ? "latest" : version)}\nMatches for `{query}` (showing {hits.Count}):\n";
 
         // Each hit goes into a field; field values must be <= 1024.
@@ -248,7 +250,8 @@ public class ThunderstoreSlash : AppModuleBase
     public async Task Readme(
         [Autocomplete(typeof(AuthorAutocomplete))] [Summary("author", "Author/owner")]
         string author,
-        [Summary("name", "Package name")] string name,
+        [Autocomplete(typeof(PackageAutocomplete))] [Summary("name", "Package name")]
+        string name,
         [Autocomplete(typeof(VersionAutocomplete))] [Summary("version", "Exact version (optional)")]
         string version = "",
         [Summary("ephemeral", "Only you can see the response")]
@@ -297,7 +300,7 @@ public class ThunderstoreSlash : AppModuleBase
     }
 
     [SlashCommand("moddiff", "Compare two versions of a mod")]
-    public async Task ModDiff([Autocomplete(typeof(AuthorAutocomplete))] string author, string name, string from, string to, bool ephemeral = false)
+    public async Task ModDiff([Autocomplete(typeof(AuthorAutocomplete))] string author, [Autocomplete(typeof(PackageAutocomplete))] string name, [Autocomplete(typeof(VersionAutocomplete))] string from, [Autocomplete(typeof(VersionAutocomplete))] string to, bool ephemeral = false)
     {
         await DeferAsync(ephemeral: ephemeral);
         var pkg = await Api.GetPackageInfo(author, name);
@@ -546,7 +549,8 @@ public class ThunderstoreSlash : AppModuleBase
     public async Task Depends(
         [Autocomplete(typeof(AuthorAutocomplete))] [Summary("author", "Author/owner")]
         string author,
-        [Summary("name", "Package name")] string name,
+        [Autocomplete(typeof(PackageAutocomplete))] [Summary("name", "Package name")]
+        string name,
         [Summary("ephemeral", "Only you can see the response")]
         bool ephemeral = false)
     {
@@ -575,7 +579,8 @@ public class ThunderstoreSlash : AppModuleBase
     public async Task Dependents(
         [Autocomplete(typeof(AuthorAutocomplete))] [Summary("author", "Author/owner")]
         string author,
-        [Summary("name", "Package name")] string name,
+        [Autocomplete(typeof(PackageAutocomplete))] [Summary("name", "Package name")]
+        string name,
         [Summary("limit", "How many (1-50)")] int limit = 25,
         [Summary("ephemeral", "Only you can see the response")]
         bool ephemeral = false)
@@ -704,7 +709,8 @@ public class ThunderstoreSlash : AppModuleBase
     public async Task ModInfo(
         [Autocomplete(typeof(AuthorAutocomplete))] [Summary("author", "Author/owner name")]
         string author,
-        [Summary("name", "Package name")] string package,
+        [Autocomplete(typeof(PackageAutocomplete))] [Summary("name", "Package name")]
+        string package,
         [Summary("ephemeral", "Only you can see the response")]
         bool ephemeral = false)
     {
@@ -871,7 +877,8 @@ public class ThunderstoreSlash : AppModuleBase
     public async Task ModpackInspect(
         [Autocomplete(typeof(AuthorAutocomplete))] [Summary("author", "Author/owner")]
         string author,
-        [Summary("name", "Package name")] string name,
+        [Autocomplete(typeof(PackageAutocomplete))] [Summary("name", "Package name")]
+        string name,
         [Summary("depth", "Max depth (1-5)")] int depth = 2,
         [Summary("ephemeral", "Only you can see the response")]
         bool ephemeral = false)
