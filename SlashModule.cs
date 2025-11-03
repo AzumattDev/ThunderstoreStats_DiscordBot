@@ -894,7 +894,14 @@ public class ThunderstoreSlash : AppModuleBase
             return;
         }
 
-        var latestDeps = pkg.versions?.FirstOrDefault()?.dependencies ?? new List<string>();
+        VersionInfo? LatestVersion(PackageInfo p) =>
+            (p.versions ?? new List<VersionInfo>())
+            .OrderByDescending(v => DateTime.TryParse(v.date_created, out var dt) ? dt : DateTime.MinValue)
+            .ThenByDescending(v => v.version_number)
+            .FirstOrDefault();
+
+        var latest = LatestVersion(pkg);
+        var latestDeps = latest?.dependencies ?? new List<string>();
         if (latestDeps.Count == 0)
         {
             await FollowupAsync("This package has no dependencies.");
@@ -902,7 +909,15 @@ public class ThunderstoreSlash : AppModuleBase
         }
 
         string MapKey(string owner, string nm) => $"{owner}/{nm}".ToLowerInvariant();
-        var map = all.Distinct().ToDictionary(p => MapKey(p.owner, p.name), p => p, StringComparer.OrdinalIgnoreCase);
+        var map = all
+            .Where(p => !string.IsNullOrWhiteSpace(p.owner) && !string.IsNullOrWhiteSpace(p.name))
+            .GroupBy(p => MapKey(p.owner!, p.name!), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderByDescending(m => DateTime.TryParse(m.date_updated, out var du) ? du : DateTime.MinValue)
+                    .ThenByDescending(m => DateTime.TryParse(m.date_created, out var dc) ? dc : DateTime.MinValue)
+                    .First(),
+                StringComparer.OrdinalIgnoreCase);
 
         (string owner, string pkg) ParseDep(string dep)
         {
@@ -928,7 +943,8 @@ public class ThunderstoreSlash : AppModuleBase
                 sb.AppendLine($"{new string(' ', (d - 1) * 2)}• {own}/{nm}");
                 if (map.TryGetValue(key, out var child))
                 {
-                    var childDeps = child.versions?.FirstOrDefault()?.dependencies ?? new List<string>();
+                    var childLatest = LatestVersion(child);
+                    var childDeps = childLatest?.dependencies ?? new List<string>();
                     Walk(childDeps, d + 1);
                 }
             }
@@ -963,7 +979,7 @@ public class ThunderstoreSlash : AppModuleBase
 
     [SlashCommand("modsbycategory", "List mods within a category.")]
     public async Task ModsByCategory(
-        [Summary("category", "Exact category name")]
+        [Autocomplete(typeof(CategoryAutocomplete))] [Summary("category", "Exact category name")]
         string category,
         [Summary("limit", "How many (1-50)")] int limit = 25,
         [Summary("include_modpacks", "Include modpacks?")]

@@ -75,3 +75,26 @@ public class VersionAutocomplete : AutocompleteHandler
         }
     }
 }
+
+public class CategoryAutocomplete : AutocompleteHandler
+{
+    public override Task<AutocompletionResult> GenerateSuggestionsAsync(IInteractionContext context, IAutocompleteInteraction interaction, IParameterInfo parameter, IServiceProvider services)
+    {
+        try
+        {
+            var cache = services.GetRequiredService<ThunderstoreCache>();
+            var needle = AutoUtil.Needle(interaction);
+            var includeModpacks = bool.TryParse(AutoUtil.Opt(interaction, "include_modpacks"), out var b) && b;
+
+            var cats = cache.SuggestCategories(needle, includeModpacks, max: 25)
+                .Select(c => new AutocompleteResult(c, c));
+
+            return Task.FromResult(AutocompletionResult.FromSuccess(cats));
+        }
+        catch
+        {
+            // prevent double-ack on exceptions
+            return Task.FromResult(AutocompletionResult.FromSuccess(Enumerable.Empty<AutocompleteResult>()));
+        }
+    }
+}
