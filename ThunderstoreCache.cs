@@ -1,10 +1,8 @@
-﻿// ThunderstoreCache.cs
+﻿namespace ThunderstoreStats_DiscordBot;
 
-namespace ThunderstoreStats_DiscordBot;
-
-public sealed class ThunderstoreCache : IDisposable
+public sealed class ThunderstoreCache(TimeSpan? refreshInterval = null) : IDisposable
 {
-    private readonly TimeSpan _refreshInterval;
+    private readonly TimeSpan _refreshInterval = refreshInterval ?? TimeSpan.FromHours(1);
     private readonly CancellationTokenSource _cts = new();
     private Task? _loop;
 
@@ -26,11 +24,6 @@ public sealed class ThunderstoreCache : IDisposable
     private List<string> _categories = []; // ordered by popularity (count of packages)
     private List<string> _categoriesLower = []; // same order, lowercased for fast contains
 
-
-    public ThunderstoreCache(TimeSpan? refreshInterval = null)
-    {
-        _refreshInterval = refreshInterval ?? TimeSpan.FromHours(1);
-    }
 
     public void Start()
     {
@@ -172,8 +165,6 @@ public sealed class ThunderstoreCache : IDisposable
         _categories = categories;
         _categoriesLower = categoriesLower;
     }
-
-    // ===== Fast suggestion helpers =====
 
     public IEnumerable<string> SuggestAuthors(string needle, int max = 20)
     {

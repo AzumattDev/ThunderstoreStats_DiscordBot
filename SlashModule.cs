@@ -6,17 +6,10 @@ using Discord.WebSocket;
 
 namespace ThunderstoreStats_DiscordBot;
 
-// Base module with handy helpers
-public abstract class AppModuleBase : InteractionModuleBase<SocketInteractionContext>
+public abstract class AppModuleBase(ThunderstoreAPI api, Chunking chunk) : InteractionModuleBase<SocketInteractionContext>
 {
-    protected ThunderstoreAPI Api { get; }
-    protected Chunking Chunk { get; }
-
-    protected AppModuleBase(ThunderstoreAPI api, Chunking chunk)
-    {
-        Api = api;
-        Chunk = chunk;
-    }
+    protected ThunderstoreAPI Api { get; } = api;
+    protected Chunking Chunk { get; } = chunk;
 
     protected async Task DeferIfNeeded(bool ephemeral = false)
     {
@@ -27,23 +20,21 @@ public abstract class AppModuleBase : InteractionModuleBase<SocketInteractionCon
     protected async Task SendEmbedsPagedAsync(IEnumerable<Embed> embeds)
     {
         // First page as original response, rest as followups
-        using IEnumerator<Embed> e = embeds.GetEnumerator();
-        if (!e.MoveNext())
+        using IEnumerator<Embed>? e = embeds?.GetEnumerator();
+        if (e is null || !e.MoveNext())
         {
             await FollowupAsync("No results.");
             return;
         }
 
-        if (Context.Interaction.HasResponded)
-            await FollowupAsync(embed: e.Current);
-        else
-            await RespondAsync(embed: e.Current);
+
+        await RespondOrFollowupAsync(embed: e.Current);
 
         while (e.MoveNext())
             await FollowupAsync(embed: e.Current);
     }
 
-    protected internal async Task SendEmbedsOptionallyPagedAsync(IEnumerable<Embed> embeds, bool paginate = true)
+    protected async Task SendEmbedsOptionallyPagedAsync(IEnumerable<Embed> embeds, bool paginate = true)
     {
         List<Embed> pages = embeds?.ToList() ?? [];
         if (pages.Count == 0)
@@ -59,21 +50,48 @@ public abstract class AppModuleBase : InteractionModuleBase<SocketInteractionCon
             return;
         }
 
-        string key = Guid.NewGuid().ToString("N");
-        PagerStore.Pages[key] = pages;
+        string key = PagerStore.Put(pages);
 
-        MessageComponent comps = ThunderstoreSlash.BuildPagerComponents(key, 0, pages.Count);
-        if (Context.Interaction.HasResponded)
-            await FollowupAsync(embed: pages[0], components: comps);
-        else
-            await RespondAsync(embed: pages[0], components: comps);
+        MessageComponent comps = PagerUi.Build(key, 0, pages.Count);
+
+        await RespondOrFollowupAsync(embed: pages[0], components: comps);
     }
-}
 
-public static class PagerStore
-{
-    // key -> pages
-    public static ConcurrentDictionary<string, IReadOnlyList<Embed>> Pages = new();
+    private async Task RespondOrFollowupAsync(string? text = null, Embed? embed = null, MessageComponent? components = null, bool? ephemeralIfFirst = null)
+    {
+        if (Context.Interaction.HasResponded)
+        {
+            if (embed is null)
+                await FollowupAsync(text: text, components: components);
+            else
+                await FollowupAsync(text: text, embed: embed, components: components);
+        }
+        else
+        {
+            if (embed is null)
+                await RespondAsync(text: text, components: components, ephemeral: ephemeralIfFirst ?? false);
+            else
+                await RespondAsync(text: text, embed: embed, components: components, ephemeral: ephemeralIfFirst ?? false);
+        }
+    }
+
+    protected async Task RespondOrFollowupWithFileAsync(FileAttachment file, string? text = null, Embed? embed = null, MessageComponent? components = null, bool? ephemeralIfFirst = null)
+    {
+        if (Context.Interaction.HasResponded)
+        {
+            if (embed is null)
+                await FollowupWithFileAsync(file, text: text, components: components);
+            else
+                await FollowupWithFileAsync(file, text: text, embed: embed, components: components);
+        }
+        else
+        {
+            if (embed is null)
+                await RespondWithFileAsync(file, text: text, components: components, ephemeral: ephemeralIfFirst ?? false);
+            else
+                await RespondWithFileAsync(file, text: text, embed: embed, components: components, ephemeral: ephemeralIfFirst ?? false);
+        }
+    }
 }
 
 public class ThunderstoreSlash(ThunderstoreAPI api, Chunking chunk) : AppModuleBase(api, chunk)
@@ -81,7 +99,7 @@ public class ThunderstoreSlash(ThunderstoreAPI api, Chunking chunk) : AppModuleB
     [ComponentInteraction("pager:*:*:*")]
     public async Task PagerHandler(string key, int index, string action)
     {
-        if (!PagerStore.Pages.TryGetValue(key, out IReadOnlyList<Embed>? pages) || pages.Count == 0)
+        if (!PagerStore.TryGet(key, out IReadOnlyList<Embed>? pages) || pages.Count == 0)
         {
             await RespondAsync("Pager expired or error in changing page, try again.", ephemeral: true);
             return;
@@ -94,12 +112,11 @@ public class ThunderstoreSlash(ThunderstoreAPI api, Chunking chunk) : AppModuleB
             _ => index
         };
 
-        MessageComponent comps = BuildPagerComponents(key, newIndex, pages.Count);
         await DeferAsync(); // keeps the interaction happy without a new message
         await ModifyOriginalResponseAsync(m =>
         {
             m.Embed = pages[newIndex];
-            m.Components = comps;
+            m.Components = PagerUi.Build(key, newIndex, pages.Count);
         });
     }
 
@@ -223,15 +240,7 @@ public class ThunderstoreSlash(ThunderstoreAPI api, Chunking chunk) : AppModuleB
             return;
         }
 
-        string key = Guid.NewGuid().ToString("N");
-        PagerStore.Pages[key] = embeds;
-
-        MessageComponent comps = BuildPagerComponents(key, 0, embeds.Count);
-        // First page as the original response
-        if (Context.Interaction.HasResponded)
-            await FollowupAsync(embed: embeds[0], components: comps);
-        else
-            await RespondAsync(embed: embeds[0], components: comps);
+        await SendEmbedsOptionallyPagedAsync(embeds, paginate: true);
     }
 
 
@@ -344,10 +353,7 @@ public class ThunderstoreSlash(ThunderstoreAPI api, Chunking chunk) : AppModuleB
                 return;
             }
 
-            if (Context.Interaction.HasResponded)
-                await FollowupWithFileAsync(file, embed: enumer.Current);
-            else
-                await RespondWithFileAsync(file, embed: enumer.Current);
+            await RespondOrFollowupWithFileAsync(file, embed: enumer.Current);
 
             while (enumer.MoveNext())
                 await FollowupAsync(embed: enumer.Current);
@@ -388,15 +394,7 @@ public class ThunderstoreSlash(ThunderstoreAPI api, Chunking chunk) : AppModuleB
             return;
         }
 
-        string key = Guid.NewGuid().ToString("N");
-        PagerStore.Pages[key] = embeds;
-
-        MessageComponent comps = BuildPagerComponents(key, 0, embeds.Count);
-        // First page as the original response
-        if (Context.Interaction.HasResponded)
-            await FollowupAsync(embed: embeds[0], components: comps);
-        else
-            await RespondAsync(embed: embeds[0], components: comps);
+        await SendEmbedsOptionallyPagedAsync(embeds, paginate: true);
     }
 
     public static MessageComponent BuildPagerComponents(string key, int index, int total)

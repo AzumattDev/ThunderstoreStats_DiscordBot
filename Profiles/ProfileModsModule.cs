@@ -59,32 +59,23 @@ public class ProfileModsModule(ThunderstoreAPI api, Chunking chunk) : AppModuleB
         }
 
         IReadOnlyList<EnrichedMod> enriched = await ModResolver.EnrichAsync(mods, community: community, ct: default);
-        string title = string.IsNullOrWhiteSpace(profileName) ? "Mods in Profile" : $"Mods in {profileName}";
+        string title = string.IsNullOrWhiteSpace(profileName) ? "Mods in profile:" : $"Mods in profile: {profileName}";
         IReadOnlyList<Embed> listEmbeds = EmbedListPager.BuildModListEmbeds(
             mods: enriched,
             title: title,
             community: community,
             color: Color.DarkBlue,
             softPageBudget: 3500,
-            header: title,
             footer: "Profile Mods");
         if (paginate && listEmbeds.Count > 0 && attach)
         {
             IEnumerable<string> lines = enriched.Select(m => $"{m.Author}-{m.Name} {m.Version}".TrimEnd());
             using MemoryStream ms = new(System.Text.Encoding.UTF8.GetBytes(string.Join("\n", lines)), writable: false);
 
-            string key = Guid.NewGuid().ToString("N");
-            PagerStore.Pages[key] = listEmbeds;
-            MessageComponent comps = ThunderstoreSlash.BuildPagerComponents(key, 0, listEmbeds.Count);
+            string key = PagerStore.Put(listEmbeds);
+            MessageComponent comps = PagerUi.Build(key, 0, listEmbeds.Count);
 
-            if (Context.Interaction.HasResponded)
-                await FollowupWithFileAsync(new FileAttachment(ms, "profile-mods.txt"),
-                    embed: listEmbeds[0], components: comps,
-                    text: $"Mods for **{title}** ({enriched.Count} total)");
-            else
-                await RespondWithFileAsync(new FileAttachment(ms, "profile-mods.txt"),
-                    embed: listEmbeds[0], components: comps,
-                    text: $"Mods for **{title}** ({enriched.Count} total)");
+            await RespondOrFollowupWithFileAsync(new FileAttachment(ms, $"{profileName}-mods.txt"), embed: listEmbeds[0], components: comps, text: $"Mods for **{title}** ({enriched.Count} total)");
 
             return;
         }

@@ -235,16 +235,9 @@ public sealed class ThunderstoreProfileClient : IDisposable
     public void Dispose() => _http.Dispose();
 }
 
-public readonly record struct ModRef(
-    string Author,
-    string Name,
-    string? Version = null,
-    string? OriginalDependencyString = null)
+public readonly record struct ModRef(string Author, string Name, string? Version = null, string? OriginalDependencyString = null)
 {
-    public override string ToString()
-        => Version is { Length: > 0 }
-            ? $"{Author}-{Name}-{Version}"
-            : $"{Author}-{Name}";
+    public override string ToString() => Version is { Length: > 0 } ? $"{Author}-{Name}-{Version}" : $"{Author}-{Name}";
 }
 
 // Minimal manifest for r2modman exports
