@@ -1,12 +1,6 @@
 ﻿// ThunderstoreCache.cs
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace DiscordBot;
+namespace ThunderstoreStats_DiscordBot;
 
 public sealed class ThunderstoreCache : IDisposable
 {
@@ -15,22 +9,22 @@ public sealed class ThunderstoreCache : IDisposable
     private Task? _loop;
 
     // Snapshots (entire references swapped atomically)
-    private List<PackageInfo> _packages = new();
-    private List<string> _authors = new(); // ordered by total downloads desc
+    private List<PackageInfo> _packages = [];
+    private List<string> _authors = []; // ordered by total downloads desc
 
     private Dictionary<string, List<string>> _modsByAuthor = new(StringComparer.OrdinalIgnoreCase); // author -> mod names (ordered)
 
     private Dictionary<string, List<string>> _versionsByKey = new(StringComparer.OrdinalIgnoreCase); // "author|mod" lower -> versions (newest first)
 
     // Lowercased mirrors for fast case-insensitive contains() without allocations
-    private List<string> _authorsLower = new();
+    private List<string> _authorsLower = [];
 
     private Dictionary<string, List<string>> _modsByAuthorLower = new(StringComparer.OrdinalIgnoreCase);
 
     private Dictionary<string, List<string>> _versionsByKeyLower = new(StringComparer.OrdinalIgnoreCase);
 
-    private List<string> _categories = new(); // ordered by popularity (count of packages)
-    private List<string> _categoriesLower = new(); // same order, lowercased for fast contains
+    private List<string> _categories = []; // ordered by popularity (count of packages)
+    private List<string> _categoriesLower = []; // same order, lowercased for fast contains
 
 
     public ThunderstoreCache(TimeSpan? refreshInterval = null)
@@ -89,7 +83,7 @@ public sealed class ThunderstoreCache : IDisposable
         try
         {
             Console.WriteLine($"[ThunderstoreCache] Refresh ({reason})…");
-            var all = await ThunderstoreAPI.GetAllModsFromThunderstore();
+            List<PackageInfo> all = await ThunderstoreAPI.GetAllModsFromThunderstore();
             BuildIndexes(all);
             Console.WriteLine($"[ThunderstoreCache] Refresh complete: packages={all.Count}");
         }
@@ -101,7 +95,7 @@ public sealed class ThunderstoreCache : IDisposable
 
     private void BuildIndexes(List<PackageInfo> all)
     {
-        var pkgs = all
+        List<PackageInfo> pkgs = all
             .Where(p => !string.IsNullOrWhiteSpace(p.owner) && !string.IsNullOrWhiteSpace(p.name))
             .ToList();
 
@@ -112,16 +106,16 @@ public sealed class ThunderstoreCache : IDisposable
             .OrderByDescending(x => x.Total)
             .ToList();
 
-        var authors = totals.Select(x => x.Author).ToList();
-        var authorsLower = authors.Select(a => a.ToLowerInvariant()).ToList();
+        List<string> authors = totals.Select(x => x.Author).ToList();
+        List<string> authorsLower = authors.Select(a => a.ToLowerInvariant()).ToList();
 
         // Mods per author (ordered by downloads desc)
-        var modsByAuthor = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-        var modsByAuthorLower = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, List<string>> modsByAuthor = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, List<string>> modsByAuthorLower = new(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var g in pkgs.GroupBy(p => p.owner!, StringComparer.OrdinalIgnoreCase))
+        foreach (IGrouping<string, PackageInfo> g in pkgs.GroupBy(p => p.owner!, StringComparer.OrdinalIgnoreCase))
         {
-            var ordered = g
+            List<string> ordered = g
                 .OrderByDescending(p => p.versions?.Sum(v => v.downloads) ?? 0)
                 .Select(p => p.name!)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -132,14 +126,14 @@ public sealed class ThunderstoreCache : IDisposable
         }
 
         // Versions per (author|mod), newest first
-        var versionsByKey = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-        var versionsByKeyLower = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, List<string>> versionsByKey = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, List<string>> versionsByKeyLower = new(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var p in pkgs)
+        foreach (PackageInfo p in pkgs)
         {
-            var keyLower = $"{p.owner}|{p.name}".ToLowerInvariant();
-            var ordered = (p.versions ?? new List<VersionInfo>())
-                .OrderByDescending(v => DateTime.TryParse(v.date_created, out var dt) ? dt : DateTime.MinValue)
+            string keyLower = $"{p.owner}|{p.name}".ToLowerInvariant();
+            List<string> ordered = (p.versions ?? [])
+                .OrderByDescending(v => DateTime.TryParse(v.date_created, out DateTime dt) ? dt : DateTime.MinValue)
                 .ThenByDescending(v => v.version_number)
                 .Select(v => v.version_number ?? "")
                 .Where(v => !string.IsNullOrWhiteSpace(v))
@@ -149,22 +143,22 @@ public sealed class ThunderstoreCache : IDisposable
             versionsByKeyLower[keyLower] = ordered.Select(s => s.ToLowerInvariant()).ToList();
         }
 
-        var catCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        foreach (var p in pkgs)
+        Dictionary<string, int> catCount = new(StringComparer.OrdinalIgnoreCase);
+        foreach (PackageInfo p in pkgs)
         {
-            var cats = p.categories ?? new List<string>();
-            foreach (var c in cats)
+            List<string> cats = p.categories ?? [];
+            foreach (string c in cats)
             {
                 if (string.IsNullOrWhiteSpace(c)) continue;
-                catCount[c] = catCount.TryGetValue(c, out var n) ? n + 1 : 1;
+                catCount[c] = catCount.TryGetValue(c, out int n) ? n + 1 : 1;
             }
         }
 
-        var categories = catCount
+        List<string> categories = catCount
             .OrderByDescending(kv => kv.Value)
             .Select(kv => kv.Key)
             .ToList();
-        var categoriesLower = categories.Select(c => c.ToLowerInvariant()).ToList();
+        List<string> categoriesLower = categories.Select(c => c.ToLowerInvariant()).ToList();
 
 
         // Atomic swaps (reference assignments are atomic)
@@ -186,9 +180,9 @@ public sealed class ThunderstoreCache : IDisposable
         if (string.IsNullOrWhiteSpace(needle))
             return _authors.Take(max);
 
-        var n = needle.ToLowerInvariant();
-        var outList = new List<string>(max);
-        for (int i = 0; i < _authors.Count && outList.Count < max; i++)
+        string n = needle.ToLowerInvariant();
+        List<string> outList = new(max);
+        for (int i = 0; i < _authors.Count && outList.Count < max; ++i)
             if (_authorsLower[i].Contains(n))
                 outList.Add(_authors[i]);
         return outList;
@@ -198,13 +192,13 @@ public sealed class ThunderstoreCache : IDisposable
     {
         if (string.IsNullOrWhiteSpace(authorOrNull))
         {
-            var n = needle?.ToLowerInvariant() ?? "";
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var outList = new List<string>(max);
-            foreach (var p in _packages)
+            string n = needle?.ToLowerInvariant() ?? "";
+            HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
+            List<string> outList = new(max);
+            foreach (PackageInfo p in _packages)
             {
                 if (outList.Count >= max) break;
-                var name = p.name!;
+                string name = p.name!;
                 if (!string.IsNullOrEmpty(n) && !name.ToLowerInvariant().Contains(n)) continue;
                 if (seen.Add(name)) outList.Add(name);
             }
@@ -213,15 +207,15 @@ public sealed class ThunderstoreCache : IDisposable
         }
         else
         {
-            var aLower = authorOrNull.ToLowerInvariant();
-            if (!_modsByAuthorLower.TryGetValue(aLower, out var modsLower))
-                return Array.Empty<string>();
+            string aLower = authorOrNull.ToLowerInvariant();
+            if (!_modsByAuthorLower.TryGetValue(aLower, out List<string>? modsLower))
+                return [];
 
-            var display = _modsByAuthor.TryGetValue(authorOrNull, out var mods) ? mods : new List<string>();
-            var n = needle?.ToLowerInvariant() ?? "";
+            List<string> display = _modsByAuthor.TryGetValue(authorOrNull, out List<string>? mods) ? mods : [];
+            string n = needle?.ToLowerInvariant() ?? "";
 
-            var outList = new List<string>(max);
-            for (int i = 0; i < display.Count && outList.Count < max; i++)
+            List<string> outList = new(max);
+            for (int i = 0; i < display.Count && outList.Count < max; ++i)
                 if (string.IsNullOrEmpty(n) || modsLower[i].Contains(n))
                     outList.Add(display[i]);
             return outList;
@@ -230,15 +224,15 @@ public sealed class ThunderstoreCache : IDisposable
 
     public IEnumerable<string> SuggestVersions(string author, string name, string needle, int max = 20)
     {
-        var keyLower = $"{author}|{name}".ToLowerInvariant();
-        if (!_versionsByKeyLower.TryGetValue(keyLower, out var versLower))
-            return Array.Empty<string>();
+        string keyLower = $"{author}|{name}".ToLowerInvariant();
+        if (!_versionsByKeyLower.TryGetValue(keyLower, out List<string>? versLower))
+            return [];
 
-        var display = _versionsByKey.TryGetValue(keyLower, out var v) ? v : new List<string>();
-        var n = needle?.ToLowerInvariant() ?? "";
+        List<string> display = _versionsByKey.TryGetValue(keyLower, out List<string>? v) ? v : [];
+        string n = needle?.ToLowerInvariant() ?? "";
 
-        var outList = new List<string>(max);
-        for (int i = 0; i < display.Count && outList.Count < max; i++)
+        List<string> outList = new(max);
+        for (int i = 0; i < display.Count && outList.Count < max; ++i)
             if (string.IsNullOrEmpty(n) || versLower[i].Contains(n))
                 outList.Add(display[i]);
         return outList;
@@ -246,12 +240,12 @@ public sealed class ThunderstoreCache : IDisposable
 
     public IEnumerable<string> SuggestCategories(string needle, bool includeModpacks, int max = 25)
     {
-        var n = needle?.ToLowerInvariant() ?? "";
-        var outList = new List<string>(max);
+        string n = needle?.ToLowerInvariant() ?? "";
+        List<string> outList = new(max);
 
         for (int i = 0; i < _categories.Count && outList.Count < max; ++i)
         {
-            var cat = _categories[i];
+            string cat = _categories[i];
             if (!includeModpacks && cat.Equals("Modpacks", StringComparison.OrdinalIgnoreCase))
                 continue;
             if (string.IsNullOrEmpty(n) || _categoriesLower[i].Contains(n))

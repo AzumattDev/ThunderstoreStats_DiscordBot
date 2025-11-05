@@ -1,19 +1,16 @@
 ﻿using System.Reflection;
 using Discord;
-using Discord.WebSocket;
 using Discord.Interactions;
+using Discord.WebSocket;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.DependencyInjection;
 
-namespace DiscordBot;
+namespace ThunderstoreStats_DiscordBot;
 
 class Program
 {
     public static DateTime LastRan = DateTime.MinValue;
-    public static List<PackageInfo>? AllPackages = new();
-    public const string ThunderstoreAllUrl = "https://thunderstore.io/c/valheim/api/v1/package/";
-
+    public static List<PackageInfo>? AllPackages = [];
     private readonly DiscordSocketClient _client;
     private readonly InteractionService _interactions;
     private readonly IConfiguration _config;
@@ -23,7 +20,7 @@ class Program
 
     public Program()
     {
-        var socketCfg = new DiscordSocketConfig
+        DiscordSocketConfig socketCfg = new()
         {
             GatewayIntents = GatewayIntents.Guilds | GatewayIntents.GuildMessages | GatewayIntents.DirectMessages,
             AlwaysDownloadUsers = false,
@@ -38,11 +35,11 @@ class Program
             .AddSingleton(x => new InteractionService(x.GetRequiredService<DiscordSocketClient>()))
             .AddSingleton<ThunderstoreAPI>()
             .AddSingleton<Chunking>()
-            .AddSingleton(new ThunderstoreCache(TimeSpan.FromHours(1))) // register
+            .AddSingleton(new ThunderstoreCache(TimeSpan.FromHours(1)))
             .BuildServiceProvider();
 
         _interactions = _services.GetRequiredService<InteractionService>();
-        
+
         _services.GetRequiredService<ThunderstoreCache>().Start();
     }
 
@@ -62,7 +59,7 @@ class Program
         _client.Ready += OnReadyAsync;
         _client.InteractionCreated += HandleInteractionAsync;
 
-        var token = _config["BotToken"];
+        string? token = _config["BotToken"];
         await _client.LoginAsync(TokenType.Bot, token);
         await _client.StartAsync();
 
@@ -78,7 +75,7 @@ class Program
 
         // Register commands: prefer testing in a guild (fast) then switch to global.
         // Guild registration (fast): set your guild id in appsettings.json as "DevGuildId"
-        if (ulong.TryParse(_config["DevGuildId"], out var guildId) && guildId != 0)
+        if (ulong.TryParse(_config["DevGuildId"], out ulong guildId) && guildId != 0)
         {
             await _interactions.RegisterCommandsToGuildAsync(guildId, true);
             Console.WriteLine($"Registered slash commands to guild {guildId}");
@@ -94,7 +91,7 @@ class Program
     {
         try
         {
-            var ctx = new SocketInteractionContext(_client, raw);
+            SocketInteractionContext ctx = new(_client, raw);
             await _interactions.ExecuteCommandAsync(ctx, _services);
         }
         catch (Exception e)

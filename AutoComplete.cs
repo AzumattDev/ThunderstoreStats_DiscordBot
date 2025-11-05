@@ -2,7 +2,7 @@
 using Discord.Interactions;
 using Microsoft.Extensions.DependencyInjection;
 
-namespace DiscordBot;
+namespace ThunderstoreStats_DiscordBot;
 
 static class AutoUtil
 {
@@ -21,9 +21,9 @@ public class AuthorAutocomplete : AutocompleteHandler
     {
         try
         {
-            var cache = services.GetRequiredService<ThunderstoreCache>();
-            var needle = AutoUtil.Needle(interaction);
-            var results = cache.SuggestAuthors(needle, 20).Select(a => new AutocompleteResult(a, a));
+            ThunderstoreCache cache = services.GetRequiredService<ThunderstoreCache>();
+            string needle = AutoUtil.Needle(interaction);
+            IEnumerable<AutocompleteResult> results = cache.SuggestAuthors(needle, 20).Select(a => new AutocompleteResult(a, a));
             return Task.FromResult(AutocompletionResult.FromSuccess(results));
         }
         catch (Exception)
@@ -39,10 +39,10 @@ public class PackageAutocomplete : AutocompleteHandler
     {
         try
         {
-            var cache = services.GetRequiredService<ThunderstoreCache>();
-            var author = AutoUtil.Opt(interaction, "author");
-            var needle = AutoUtil.Needle(interaction);
-            var results = cache.SuggestPackages(author, needle, 20).Select(n => new AutocompleteResult(n, n));
+            ThunderstoreCache cache = services.GetRequiredService<ThunderstoreCache>();
+            string author = AutoUtil.Opt(interaction, "author");
+            string needle = AutoUtil.Needle(interaction);
+            IEnumerable<AutocompleteResult> results = cache.SuggestPackages(author, needle, 20).Select(n => new AutocompleteResult(n, n));
             return Task.FromResult(AutocompletionResult.FromSuccess(results));
         }
         catch (Exception)
@@ -58,12 +58,12 @@ public class VersionAutocomplete : AutocompleteHandler
     {
         try
         {
-            var cache = services.GetRequiredService<ThunderstoreCache>();
-            var author = AutoUtil.Opt(interaction, "author");
-            var pkg = AutoUtil.Opt(interaction, "name");
+            ThunderstoreCache cache = services.GetRequiredService<ThunderstoreCache>();
+            string author = AutoUtil.Opt(interaction, "author");
+            string pkg = AutoUtil.Opt(interaction, "name");
             if (string.IsNullOrWhiteSpace(pkg)) pkg = AutoUtil.Opt(interaction, "package");
 
-            IEnumerable<AutocompleteResult> results = Enumerable.Empty<AutocompleteResult>();
+            IEnumerable<AutocompleteResult> results = [];
             if (!string.IsNullOrWhiteSpace(author) && !string.IsNullOrWhiteSpace(pkg))
                 results = cache.SuggestVersions(author, pkg, AutoUtil.Needle(interaction), 20).Select(v => new AutocompleteResult(v, v));
 
@@ -82,19 +82,18 @@ public class CategoryAutocomplete : AutocompleteHandler
     {
         try
         {
-            var cache = services.GetRequiredService<ThunderstoreCache>();
-            var needle = AutoUtil.Needle(interaction);
-            var includeModpacks = bool.TryParse(AutoUtil.Opt(interaction, "include_modpacks"), out var b) && b;
+            ThunderstoreCache cache = services.GetRequiredService<ThunderstoreCache>();
+            string needle = AutoUtil.Needle(interaction);
+            bool includeModpacks = bool.TryParse(AutoUtil.Opt(interaction, "include_modpacks"), out bool b) && b;
 
-            var cats = cache.SuggestCategories(needle, includeModpacks, max: 25)
-                .Select(c => new AutocompleteResult(c, c));
+            IEnumerable<AutocompleteResult> cats = cache.SuggestCategories(needle, includeModpacks, max: 25).Select(c => new AutocompleteResult(c, c));
 
             return Task.FromResult(AutocompletionResult.FromSuccess(cats));
         }
         catch
         {
             // prevent double-ack on exceptions
-            return Task.FromResult(AutocompletionResult.FromSuccess(Enumerable.Empty<AutocompleteResult>()));
+            return Task.FromResult(AutocompletionResult.FromSuccess([]));
         }
     }
 }

@@ -1,19 +1,22 @@
 ﻿using Newtonsoft.Json;
 
-namespace DiscordBot;
+namespace ThunderstoreStats_DiscordBot;
 
 public class ThunderstoreAPI
 {
-    private static readonly HttpClient client = new HttpClient();
-    private static readonly string baseUrl = "https://thunderstore.io/api/v1";
-    private static readonly string BaseExperimental = "https://thunderstore.io/api/experimental/";
+    private static readonly HttpClient client = new();
+    public const string BaseTsUrl = "https://thunderstore.io/";
+    public static readonly string BaseApiUrl = $"{BaseTsUrl}api/v1/";
+    public static readonly string BaseApiExpUrl = $"{BaseTsUrl}api/experimental/";
+    public static readonly string ThunderstoreAllUrl = $"{BaseTsUrl}c/valheim/api/v1/package/";
+
 
     public async Task<string> GetPackageInfoRaw(string packageName)
     {
         try
         {
-            var url = $"https://thunderstore.io/api/v1/package/{packageName}/";
-            var res = await client.GetAsync(url);
+            string url = $"{BaseApiUrl}package/{packageName}/";
+            HttpResponseMessage res = await client.GetAsync(url);
             res.EnsureSuccessStatusCode();
             return await res.Content.ReadAsStringAsync();
         }
@@ -25,51 +28,34 @@ public class ThunderstoreAPI
 
     public async Task<ExperimentalPackageInfo> GetPackageInfo(string authorName, string packageName)
     {
-        var res = await client.GetAsync($"{BaseExperimental}package/{authorName}/{packageName}/");
+        HttpResponseMessage res = await client.GetAsync($"{BaseApiExpUrl}package/{authorName}/{packageName}/");
         if (!res.IsSuccessStatusCode) return new ExperimentalPackageInfo();
-        var json = await res.Content.ReadAsStringAsync();
+        string json = await res.Content.ReadAsStringAsync();
         return JsonConvert.DeserializeObject<ExperimentalPackageInfo>(json) ?? new ExperimentalPackageInfo();
     }
 
     public static async Task<MarkdownPackage> SearchPackages(string author, string modName, string version)
     {
         // Example https://thunderstore.io/api/experimental/package/Azumatt/AzuCraftyBoxes/1.6.1/readme/
-        var response = await client.GetAsync($"{BaseExperimental}package/{author}/{modName}/{version}/readme/");
+        HttpResponseMessage response = await client.GetAsync($"{BaseApiExpUrl}package/{author}/{modName}/{version}/readme/");
         if (!response.IsSuccessStatusCode)
             return new MarkdownPackage();
 
-        var json = await response.Content.ReadAsStringAsync();
-        var result = JsonConvert.DeserializeObject<MarkdownPackage>(json);
+        string json = await response.Content.ReadAsStringAsync();
+        MarkdownPackage? result = JsonConvert.DeserializeObject<MarkdownPackage>(json);
         return result;
     }
-    
+
     public static async Task<MarkdownPackage> GetChangelog(string author, string modName, string version)
     {
         // Example https://thunderstore.io/api/experimental/package/Azumatt/AzuCraftyBoxes/1.6.1/readme/
-        var response = await client.GetAsync($"{BaseExperimental}package/{author}/{modName}/{version}/changelog/");
+        HttpResponseMessage response = await client.GetAsync($"{BaseApiExpUrl}package/{author}/{modName}/{version}/changelog/");
         if (!response.IsSuccessStatusCode)
             return new MarkdownPackage();
 
-        var json = await response.Content.ReadAsStringAsync();
-        var result = JsonConvert.DeserializeObject<MarkdownPackage>(json);
+        string json = await response.Content.ReadAsStringAsync();
+        MarkdownPackage? result = JsonConvert.DeserializeObject<MarkdownPackage>(json);
         return result;
-    }
-
-    public static async Task<int> GetAuthorDownloadCount(string authorName)
-    {
-        try
-        {
-            string url = $"https://thunderstore.io/api/v1/community/{authorName}/packages/";
-            HttpResponseMessage response = await client.GetAsync(url);
-            response.EnsureSuccessStatusCode();
-            string content = await response.Content.ReadAsStringAsync();
-            List<Package>? packages = JsonConvert.DeserializeObject<List<Package>>(content);
-            return packages.Sum(p => p.Downloads);
-        }
-        catch (HttpRequestException ex)
-        {
-            return 0; // Could log the error or handle it differently
-        }
     }
 
     public static async Task<List<PackageInfo>> GetAllModsFromThunderstore()
@@ -79,10 +65,10 @@ public class ThunderstoreAPI
             if (Program.LastRan.AddHours(1) < DateTime.UtcNow || Program.AllPackages is null || Program.AllPackages.Count == 0)
             {
                 Console.WriteLine("Fetching package data from Thunderstore...");
-                var res = await client.GetAsync(Program.ThunderstoreAllUrl);
+                HttpResponseMessage res = await client.GetAsync(ThunderstoreAllUrl);
                 res.EnsureSuccessStatusCode();
-                var json = await res.Content.ReadAsStringAsync();
-                var packages = JsonConvert.DeserializeObject<List<PackageInfo>>(json) ?? new();
+                string json = await res.Content.ReadAsStringAsync();
+                List<PackageInfo> packages = JsonConvert.DeserializeObject<List<PackageInfo>>(json) ?? [];
                 Program.AllPackages = packages;
                 Program.LastRan = DateTime.UtcNow;
             }
@@ -92,26 +78,26 @@ public class ThunderstoreAPI
         catch (Exception ex)
         {
             Console.WriteLine("Failed to fetch or parse package data: " + ex.Message);
-            return new();
+            return [];
         }
     }
 
     public static async Task<List<PackageInfo>> GetLatestMods()
     {
-        var packages = await DiscordBot.ThunderstoreAPI.GetAllModsFromThunderstore();
+        List<PackageInfo> packages = await GetAllModsFromThunderstore();
         return packages.OrderByDescending(p => p.date_created).Take(10).ToList();
     }
 
 
     public async Task<PackageInfo?> GetModInfo(string modName)
     {
-        var packages = await GetAllModsFromThunderstore();
+        List<PackageInfo> packages = await GetAllModsFromThunderstore();
         return packages.FirstOrDefault(p => p.name.Equals(modName, StringComparison.OrdinalIgnoreCase));
     }
 
     public static async Task<List<PackageInfo>> GetModsByAuthor(string author)
     {
-        var packages = await GetAllModsFromThunderstore();
+        List<PackageInfo> packages = await GetAllModsFromThunderstore();
         return packages.Where(p => p.owner.Equals(author, StringComparison.OrdinalIgnoreCase)).ToList();
     }
 
@@ -119,13 +105,13 @@ public class ThunderstoreAPI
     {
         try
         {
-            var packages = await DiscordBot.ThunderstoreAPI.GetAllModsFromThunderstore();
+            List<PackageInfo> packages = await GetAllModsFromThunderstore();
 
             // Filter the packages by author name
             List<PackageInfo> authorPackages = packages.Where(p => p.owner == authorName).ToList();
 
             if (authorPackages == null || !authorPackages.Any())
-                return new AuthorStats { mods_count = 0, total_downloads = 0, average_downloads = 0, median_downloads = 0, medianDownloadsMultiplied = 0, most_downloaded_mod = "", topModsSorted = new List<PackageInfo>() };
+                return new AuthorStats { mods_count = 0, total_downloads = 0, average_downloads = 0, median_downloads = 0, medianDownloadsMultiplied = 0, most_downloaded_mod = "", topModsSorted = [] };
 
             // Calculating average downloads of top 3 mods
             double topThreeAverage = authorPackages.Where(m => !m.is_pinned && !m.name.ToLower().Contains("modpack") && !m.categories.Contains("Modpacks"))
@@ -145,7 +131,7 @@ public class ThunderstoreAPI
                 ? (downloads[downloads.Count / 2] + downloads[downloads.Count / 2 - 1]) / 2
                 : downloads[downloads.Count / 2];*/
 
-            AuthorStats stats = new AuthorStats
+            AuthorStats stats = new()
             {
                 mods_count = authorPackages.Count,
                 total_downloads = total_downloads,
@@ -171,7 +157,7 @@ public class ThunderstoreAPI
         catch (Exception ex)
         {
             Console.WriteLine("Failed to fetch or parse author package data: " + ex.Message);
-            return new AuthorStats { mods_count = 0, total_downloads = 0, average_downloads = 0, median_downloads = 0, medianDownloadsMultiplied = 0, most_downloaded_mod = "", topModsSorted = new List<PackageInfo>() };
+            return new AuthorStats { mods_count = 0, total_downloads = 0, average_downloads = 0, median_downloads = 0, medianDownloadsMultiplied = 0, most_downloaded_mod = "", topModsSorted = [] };
         }
     }
 
@@ -179,7 +165,7 @@ public class ThunderstoreAPI
     {
         try
         {
-            var packages = await DiscordBot.ThunderstoreAPI.GetAllModsFromThunderstore();
+            List<PackageInfo> packages = await GetAllModsFromThunderstore();
 
             Dictionary<string, List<PackageInfo>> authorGroups = packages.Where(m => !m.is_pinned && !m.name.ToLower().Contains("modpack") && !m.categories.Contains("Modpacks")).GroupBy(p => p.owner).Where(g => g.Count() >= 5)
                 .ToDictionary(g => g.Key, g => g.ToList());
@@ -189,7 +175,7 @@ public class ThunderstoreAPI
             int globalMedianDownloads = CalculateMedian(allDownloads);
             int globalMedianMultiplied = globalMedianDownloads * packages.Count;
 
-            Dictionary<string, AuthorStats> authorStats = new Dictionary<string, AuthorStats>();
+            Dictionary<string, AuthorStats> authorStats = new();
 
             foreach (KeyValuePair<string, List<PackageInfo>> authorGroup in authorGroups)
             {
@@ -222,28 +208,26 @@ public class ThunderstoreAPI
             return new Dictionary<string, AuthorStats>();
         }
     }
-    
+
     public static async Task<string?> GetLatestVersion(string author, string name)
     {
-        var res = await client.GetAsync($"{BaseExperimental}package/{author}/{name}/");
+        HttpResponseMessage res = await client.GetAsync($"{BaseApiExpUrl}package/{author}/{name}/");
         if (!res.IsSuccessStatusCode) return null;
-        var json = await res.Content.ReadAsStringAsync();
-        var pkg = JsonConvert.DeserializeObject<ExperimentalPackageInfo>(json);
+        string json = await res.Content.ReadAsStringAsync();
+        ExperimentalPackageInfo? pkg = JsonConvert.DeserializeObject<ExperimentalPackageInfo>(json);
         return pkg?.latest?.version_number;
     }
 
     public static async Task<string?> GetReadmeMarkdown(string author, string name, string? versionOrNull = null)
     {
-        var version = string.IsNullOrWhiteSpace(versionOrNull)
-            ? await GetLatestVersion(author, name)
-            : versionOrNull;
+        string? version = string.IsNullOrWhiteSpace(versionOrNull) ? await GetLatestVersion(author, name) : versionOrNull;
         if (string.IsNullOrWhiteSpace(version)) return null;
 
-        var response = await client.GetAsync($"{BaseExperimental}package/{author}/{name}/{version}/readme/");
+        HttpResponseMessage response = await client.GetAsync($"{BaseApiExpUrl}package/{author}/{name}/{version}/readme/");
         if (!response.IsSuccessStatusCode) return null;
 
-        var json = await response.Content.ReadAsStringAsync();
-        var result = JsonConvert.DeserializeObject<MarkdownPackage>(json);
+        string json = await response.Content.ReadAsStringAsync();
+        MarkdownPackage? result = JsonConvert.DeserializeObject<MarkdownPackage>(json);
         return result?.markdown;
     }
 
@@ -257,10 +241,8 @@ public class ThunderstoreAPI
         {
             return (sortedNumbers[halfIndex] + sortedNumbers[halfIndex - 1]) / 2;
         }
-        else
-        {
-            return sortedNumbers[halfIndex];
-        }
+
+        return sortedNumbers[halfIndex];
     }
 }
 
@@ -286,20 +268,20 @@ public class AuthorStats
 
     public string most_downloaded_mod { get; set; }
 
-    public List<PackageInfo> topModsSorted { get; set; } = new List<PackageInfo>();
+    public List<PackageInfo> topModsSorted { get; set; } = [];
 
     public int global_median_downloads { get; set; }
 }
 
 public static class SubscriptionManager
 {
-    private static Dictionary<string, HashSet<ulong>> subscriptions = new Dictionary<string, HashSet<ulong>>();
+    private static Dictionary<string, HashSet<ulong>> subscriptions = new();
 
     public static bool Subscribe(ulong userId, string packageName)
     {
         if (!subscriptions.ContainsKey(packageName))
         {
-            subscriptions[packageName] = new HashSet<ulong>();
+            subscriptions[packageName] = [];
         }
 
         return subscriptions[packageName].Add(userId);

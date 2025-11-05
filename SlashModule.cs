@@ -1,9 +1,10 @@
 ﻿using System.Collections.Concurrent;
+using System.Text;
 using Discord;
 using Discord.Interactions;
 using Discord.WebSocket;
 
-namespace DiscordBot;
+namespace ThunderstoreStats_DiscordBot;
 
 // Base module with handy helpers
 public abstract class AppModuleBase : InteractionModuleBase<SocketInteractionContext>
@@ -26,7 +27,7 @@ public abstract class AppModuleBase : InteractionModuleBase<SocketInteractionCon
     protected async Task SendEmbedsPagedAsync(IEnumerable<Embed> embeds)
     {
         // First page as original response, rest as followups
-        using var e = embeds.GetEnumerator();
+        using IEnumerator<Embed> e = embeds.GetEnumerator();
         if (!e.MoveNext())
         {
             await FollowupAsync("No results.");
@@ -41,37 +42,59 @@ public abstract class AppModuleBase : InteractionModuleBase<SocketInteractionCon
         while (e.MoveNext())
             await FollowupAsync(embed: e.Current);
     }
+
+    protected internal async Task SendEmbedsOptionallyPagedAsync(IEnumerable<Embed> embeds, bool paginate = true)
+    {
+        List<Embed> pages = embeds?.ToList() ?? [];
+        if (pages.Count == 0)
+        {
+            await FollowupAsync("No results.");
+            return;
+        }
+
+        // If only one page, buttons aren’t helpful.
+        if (!paginate || pages.Count == 1)
+        {
+            await SendEmbedsPagedAsync(pages);
+            return;
+        }
+
+        string key = Guid.NewGuid().ToString("N");
+        PagerStore.Pages[key] = pages;
+
+        MessageComponent comps = ThunderstoreSlash.BuildPagerComponents(key, 0, pages.Count);
+        if (Context.Interaction.HasResponded)
+            await FollowupAsync(embed: pages[0], components: comps);
+        else
+            await RespondAsync(embed: pages[0], components: comps);
+    }
 }
 
 public static class PagerStore
 {
     // key -> pages
-    public static ConcurrentDictionary<string, List<Embed>> Pages = new();
+    public static ConcurrentDictionary<string, IReadOnlyList<Embed>> Pages = new();
 }
 
-public class ThunderstoreSlash : AppModuleBase
+public class ThunderstoreSlash(ThunderstoreAPI api, Chunking chunk) : AppModuleBase(api, chunk)
 {
-    public ThunderstoreSlash(ThunderstoreAPI api, Chunking chunk) : base(api, chunk)
-    {
-    }
-
     [ComponentInteraction("pager:*:*:*")]
     public async Task PagerHandler(string key, int index, string action)
     {
-        if (!PagerStore.Pages.TryGetValue(key, out var pages) || pages.Count == 0)
+        if (!PagerStore.Pages.TryGetValue(key, out IReadOnlyList<Embed>? pages) || pages.Count == 0)
         {
-            await RespondAsync("Pager expired.", ephemeral: true);
+            await RespondAsync("Pager expired or error in changing page, try again.", ephemeral: true);
             return;
         }
 
-        int newIndex = index;
-        if (action == "prev") newIndex = Math.Max(0, index - 1);
-        else if (action == "next") newIndex = Math.Min(pages.Count - 1, index + 1);
-        else /* noop */ newIndex = index;
+        int newIndex = action switch
+        {
+            "prev" => Math.Max(0, index - 1),
+            "next" => Math.Min(pages.Count - 1, index + 1),
+            _ => index
+        };
 
-        var comps = BuildPagerComponents(key, newIndex, pages.Count);
-
-        // Edit the message the buttons belong to
+        MessageComponent comps = BuildPagerComponents(key, newIndex, pages.Count);
         await DeferAsync(); // keeps the interaction happy without a new message
         await ModifyOriginalResponseAsync(m =>
         {
@@ -82,11 +105,9 @@ public class ThunderstoreSlash : AppModuleBase
 
 
     [SlashCommand("diag_here", "Diagnose why slash commands may be hidden or failing in this channel.")]
-    [EnabledInDm(false)]
+    [CommandContextType(InteractionContextType.Guild, InteractionContextType.PrivateChannel)]
     [DefaultMemberPermissions(GuildPermission.Administrator)]
-    public async Task DiagHere(
-        [Summary("user", "User to simulate (optional)")]
-        IUser? who = null)
+    public async Task DiagHere([Summary("user", "User to simulate (optional)")] IUser? who = null)
     {
         await DeferAsync(ephemeral: true);
 
@@ -96,8 +117,8 @@ public class ThunderstoreSlash : AppModuleBase
             return;
         }
 
-        var guild = Context.Guild;
-        var me = await ((IGuild)guild).GetCurrentUserAsync();
+        SocketGuild? guild = Context.Guild;
+        IGuildUser? me = await ((IGuild)guild).GetCurrentUserAsync();
 
         // Pick target = provided user or the invoker
         SocketGuildUser? target = who != null ? guild.GetUser(who.Id) : Context.User as SocketGuildUser;
@@ -109,11 +130,10 @@ public class ThunderstoreSlash : AppModuleBase
         }
 
         // Effective perms in this channel
-        var userPerms = target.GetPermissions(ch);
-        var botPerms = me.GetPermissions(ch);
+        ChannelPermissions userPerms = target.GetPermissions(ch);
+        ChannelPermissions botPerms = me.GetPermissions(ch);
 
-        var lines = new List<string>();
-        void Line(bool ok, string text) => lines.Add($"{(ok ? "✅" : "❌")} {text}");
+        List<string> lines = [];
 
         // Member-side gates (visibility/ability to invoke)
         Line(userPerms.UseApplicationCommands, $"**{target.DisplayName}** has **Use Application Commands** in this channel.");
@@ -129,12 +149,12 @@ public class ThunderstoreSlash : AppModuleBase
             lines.Add("ℹ️ Target is **Administrator** and bypasses channel denies. Regular members won’t.");
 
         // Surface channel overwrites explicitly denying Use Application Commands
-        var denyTargets = new List<string>();
+        List<string> denyTargets = [];
         try
         {
-            foreach (var ow in ch.PermissionOverwrites)
+            foreach (Overwrite ow in ch.PermissionOverwrites)
             {
-                var p = ow.Permissions;
+                OverwritePermissions p = ow.Permissions;
                 if (p.UseApplicationCommands == PermValue.Deny)
                 {
                     bool applies = ow.TargetType switch
@@ -163,12 +183,15 @@ public class ThunderstoreSlash : AppModuleBase
         // Integration permissions hint (server-wide command restrictions)
         lines.Add("ℹ️ Also check **Server Settings → Integrations → Your App → Command Permissions**. If restricted, only allowed roles/users can run slash commands.");
 
-        var eb = new EmbedBuilder()
+        EmbedBuilder? eb = new EmbedBuilder()
             .WithTitle($"Diagnostics for #{ch.Name} — {(who != null ? target.DisplayName : "you")}")
             .WithDescription(string.Join("\n", lines))
             .WithColor(lines.Any(l => l.StartsWith("❌")) || denyTargets.Count > 0 ? Color.DarkRed : Color.DarkGreen);
 
         await FollowupAsync(embed: eb.Build(), ephemeral: true);
+        return;
+
+        void Line(bool ok, string text) => lines.Add($"{(ok ? "✅" : "❌")} {text}");
     }
 
     [SlashCommand("changelog", "Display a package CHANGELOG with pagination.")]
@@ -184,11 +207,11 @@ public class ThunderstoreSlash : AppModuleBase
     {
         await DeferIfNeeded(ephemeral);
 
-        var res = await ThunderstoreAPI.GetChangelog(author, name, version);
-        var body = string.IsNullOrWhiteSpace(res?.markdown) ? "_No CHANGELOG found._" : res.markdown;
+        MarkdownPackage? res = await ThunderstoreAPI.GetChangelog(author, name, version);
+        string body = string.IsNullOrWhiteSpace(res?.markdown) ? "_No CHANGELOG found._" : res.markdown;
 
         // Break into embed-sized chunks
-        var embeds = Chunk.BuildDescriptionEmbedsWithHeader(
+        List<Embed> embeds = Chunk.BuildDescriptionEmbedsWithHeader(
             $"{author}/{name} — CHANGELOG",
             string.IsNullOrWhiteSpace(version) ? "" : $"Version: `{version}`",
             body,
@@ -200,10 +223,10 @@ public class ThunderstoreSlash : AppModuleBase
             return;
         }
 
-        var key = Guid.NewGuid().ToString("N");
+        string key = Guid.NewGuid().ToString("N");
         PagerStore.Pages[key] = embeds;
 
-        var comps = BuildPagerComponents(key, 0, embeds.Count);
+        MessageComponent comps = BuildPagerComponents(key, 0, embeds.Count);
         // First page as the original response
         if (Context.Interaction.HasResponded)
             await FollowupAsync(embed: embeds[0], components: comps);
@@ -232,24 +255,25 @@ public class ThunderstoreSlash : AppModuleBase
     {
         await DeferIfNeeded(ephemeral);
 
-        var res = await ThunderstoreAPI.SearchPackages(author, name, version);
-        var content = string.IsNullOrWhiteSpace(res?.markdown) ? "# README not found\n" : res.markdown;
+        MarkdownPackage? res = await ThunderstoreAPI.SearchPackages(author, name, version);
+        string content = string.IsNullOrWhiteSpace(res?.markdown) ? "# README not found\n" : res.markdown;
 
         if (format == ReadmeFormat.txt)
             content = content.Replace("\r", "").Replace("\n", Environment.NewLine); // quick normalize
 
-        string safe(string s) => string.Join("_", s.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
-        var fileName = $"{safe(author)}-{safe(name)}{(string.IsNullOrWhiteSpace(version) ? "" : "-" + safe(version))}.readme.{format}";
+        string fileName = $"{Safe(author)}-{Safe(name)}{(string.IsNullOrWhiteSpace(version) ? "" : "-" + Safe(version))}.readme.{format}";
 
-        var bytes = System.Text.Encoding.UTF8.GetBytes(content);
-        using var ms = new MemoryStream(bytes, writable: false);
-        var file = new FileAttachment(ms, fileName);
+        byte[] bytes = Encoding.UTF8.GetBytes(content);
+        using MemoryStream ms = new(bytes, writable: false);
+        FileAttachment file = new(ms, fileName);
 
-        // If you've already responded with DeferAsync, use FollowupWithFileAsync
+        // If already responded with DeferAsync, use FollowupWithFileAsync
         await FollowupWithFileAsync(file, text: $"Here’s the README for **{author}/{name}**{(string.IsNullOrWhiteSpace(version) ? "" : $" `{version}`")}.");
+        return;
+
+        string Safe(string s) => string.Join("_", s.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
     }
 
-    // ThunderstoreSlash.cs (inside ThunderstoreSlash)
     [SlashCommand("readmesearch", "Search a mod's README and return highlighted excerpts.")]
     public async Task ReadmeSearchCmd(
         [Autocomplete(typeof(AuthorAutocomplete))] [Summary("author", "Author/owner")]
@@ -274,14 +298,14 @@ public class ThunderstoreSlash : AppModuleBase
 
         await DeferIfNeeded(ephemeral);
 
-        var md = await ThunderstoreAPI.GetReadmeMarkdown(author, name, string.IsNullOrWhiteSpace(version) ? null : version);
+        string? md = await ThunderstoreAPI.GetReadmeMarkdown(author, name, string.IsNullOrWhiteSpace(version) ? null : version);
         if (string.IsNullOrWhiteSpace(md))
         {
             await FollowupAsync("README not found for that package/version.");
             return;
         }
 
-        var hits = ReadmeSearch.Find(md!, query, context, maxMatches, caseInsensitive: true);
+        List<(int LineNo, string Excerpt)> hits = ReadmeSearch.Find(md!, query, context, maxMatches, caseInsensitive: true);
         if (hits.Count == 0)
         {
             await FollowupAsync($"No matches for `{query}` in {(string.IsNullOrWhiteSpace(version) ? "latest" : version)} README.");
@@ -289,33 +313,31 @@ public class ThunderstoreSlash : AppModuleBase
         }
 
 
-        var header = $"**{author}/{name}** — {(string.IsNullOrWhiteSpace(version) ? "latest" : version)}\nMatches for `{query}` (showing {hits.Count}):\n";
+        string header = $"**{author}/{name}** — {(string.IsNullOrWhiteSpace(version) ? "latest" : version)}\nMatches for `{query}` (showing {hits.Count}):\n";
 
         // Each hit goes into a field; field values must be <= 1024.
-        // Use the safety helper which also tidies code fences if they get cut.
-        var parts = hits.Select(h => (
+        IEnumerable<(string Name, string Value, bool Inline)> parts = hits.Select(h => (
             Name: $"Line {h.LineNo}",
             Value: Chunking.TruncField(h.Excerpt, 1000),
             Inline: false
         ));
 
-        // Build pages while respecting *all* embed limits (incl. 6000 total).
-        var embeds = Chunk.BuildPagedEmbeds("README Search", header, parts, Color.DarkGreen);
+        IEnumerable<Embed> embeds = Chunk.BuildPagedEmbeds("README Search", header, parts, Color.DarkGreen);
 
 
         if (attach)
         {
             // Create a compact .md report for download
-            var text = $"# README Search — {author}/{name} ({(string.IsNullOrWhiteSpace(version) ? "latest" : version)})\n" +
-                       $"Query: {query}\n\n" +
-                       string.Join("\n\n---\n\n", hits.Select(h => $"Line {h.LineNo}\n{h.Excerpt}"));
+            string text = $"# README Search — {author}/{name} ({(string.IsNullOrWhiteSpace(version) ? "latest" : version)})\n" +
+                          $"Query: {query}\n\n" +
+                          string.Join("\n\n---\n\n", hits.Select(h => $"Line {h.LineNo}\n{h.Excerpt}"));
 
-            var bytes = System.Text.Encoding.UTF8.GetBytes(text);
-            using var ms = new MemoryStream(bytes, writable: false);
-            var file = new FileAttachment(ms, $"{author}-{name}-readme-search.md");
+            byte[] bytes = Encoding.UTF8.GetBytes(text);
+            using MemoryStream ms = new(bytes, writable: false);
+            FileAttachment file = new(ms, $"{author}-{name}-readme-search.md");
 
             // first page + file
-            using var enumer = embeds.GetEnumerator();
+            using IEnumerator<Embed> enumer = embeds.GetEnumerator();
             if (!enumer.MoveNext())
             {
                 await FollowupWithFileAsync(file, text: "No results.");
@@ -350,11 +372,11 @@ public class ThunderstoreSlash : AppModuleBase
     {
         await DeferIfNeeded(ephemeral);
 
-        var res = await ThunderstoreAPI.SearchPackages(author, name, version);
-        var body = string.IsNullOrWhiteSpace(res?.markdown) ? "_No README found._" : res.markdown;
+        MarkdownPackage? res = await ThunderstoreAPI.SearchPackages(author, name, version);
+        string body = string.IsNullOrWhiteSpace(res?.markdown) ? "_No README found._" : res.markdown;
 
         // Break into embed-sized chunks
-        var embeds = Chunk.BuildDescriptionEmbedsWithHeader(
+        List<Embed> embeds = Chunk.BuildDescriptionEmbedsWithHeader(
             $"{author}/{name} — README",
             string.IsNullOrWhiteSpace(version) ? "" : $"Version: `{version}`",
             body,
@@ -366,10 +388,10 @@ public class ThunderstoreSlash : AppModuleBase
             return;
         }
 
-        var key = Guid.NewGuid().ToString("N");
+        string key = Guid.NewGuid().ToString("N");
         PagerStore.Pages[key] = embeds;
 
-        var comps = BuildPagerComponents(key, 0, embeds.Count);
+        MessageComponent comps = BuildPagerComponents(key, 0, embeds.Count);
         // First page as the original response
         if (Context.Interaction.HasResponded)
             await FollowupAsync(embed: embeds[0], components: comps);
@@ -377,12 +399,12 @@ public class ThunderstoreSlash : AppModuleBase
             await RespondAsync(embed: embeds[0], components: comps);
     }
 
-    private static MessageComponent BuildPagerComponents(string key, int index, int total)
+    public static MessageComponent BuildPagerComponents(string key, int index, int total)
     {
-        var prevDisabled = index <= 0;
-        var nextDisabled = index >= total - 1;
+        bool prevDisabled = index <= 0;
+        bool nextDisabled = index >= total - 1;
 
-        var row = new ActionRowBuilder()
+        ActionRowBuilder? row = new ActionRowBuilder()
             .WithButton("⟨ Prev", $"pager:{key}:{index}:prev", ButtonStyle.Secondary, disabled: prevDisabled)
             .WithButton($"{index + 1}/{total}", $"pager:{key}:{index}:noop", ButtonStyle.Secondary, disabled: true)
             .WithButton("Next ⟩", $"pager:{key}:{index}:next", ButtonStyle.Secondary, disabled: nextDisabled);
@@ -394,17 +416,17 @@ public class ThunderstoreSlash : AppModuleBase
     public async Task ModDiff([Autocomplete(typeof(AuthorAutocomplete))] string author, [Autocomplete(typeof(PackageAutocomplete))] string name, [Autocomplete(typeof(VersionAutocomplete))] string from, [Autocomplete(typeof(VersionAutocomplete))] string to, bool ephemeral = false)
     {
         await DeferAsync(ephemeral: ephemeral);
-        var pkg = await Api.GetPackageInfo(author, name);
-        var v1 = pkg?.latest is null
+        ExperimentalPackageInfo? pkg = await Api.GetPackageInfo(author, name);
+        VersionInfo? v1 = pkg?.latest is null
             ? null
             : (await ThunderstoreAPI.GetAllModsFromThunderstore())
             .FirstOrDefault(p => p.owner == author && p.name == name)?.versions?.FirstOrDefault(v => v.version_number == from);
-        var v2 = (await ThunderstoreAPI.GetAllModsFromThunderstore())
+        VersionInfo v2 = (await ThunderstoreAPI.GetAllModsFromThunderstore())
             .First(p => p.owner == author && p.name == name).versions!.First(v => v.version_number == to);
 
-        var added = v2.dependencies?.Except(v1?.dependencies ?? new()).ToList() ?? new();
-        var removed = (v1?.dependencies ?? new()).Except(v2.dependencies ?? new()).ToList();
-        var eb = new EmbedBuilder().WithTitle($"{author}/{name} — {from} → {to}")
+        List<string> added = v2.dependencies?.Except(v1?.dependencies ?? []).ToList() ?? [];
+        List<string> removed = (v1?.dependencies ?? []).Except(v2.dependencies ?? []).ToList();
+        EmbedBuilder? eb = new EmbedBuilder().WithTitle($"{author}/{name} — {from} → {to}")
             .AddField("Added deps", added.Count == 0 ? "—" : string.Join("\n", added), false)
             .AddField("Removed deps", removed.Count == 0 ? "—" : string.Join("\n", removed), false)
             .AddField("File size Δ", $"{(v2.file_size - (v1?.file_size ?? 0)):N0} bytes", true)
@@ -422,9 +444,9 @@ public class ThunderstoreSlash : AppModuleBase
         bool ephemeral = false)
     {
         await DeferIfNeeded(ephemeral);
-        var all = await ThunderstoreAPI.GetAllModsFromThunderstore();
-        var ag = all.Where(x => x.owner.Equals(a, StringComparison.OrdinalIgnoreCase)).ToList();
-        var bg = all.Where(x => x.owner.Equals(b, StringComparison.OrdinalIgnoreCase)).ToList();
+        List<PackageInfo> all = await ThunderstoreAPI.GetAllModsFromThunderstore();
+        List<PackageInfo> ag = all.Where(x => x.owner.Equals(a, StringComparison.OrdinalIgnoreCase)).ToList();
+        List<PackageInfo> bg = all.Where(x => x.owner.Equals(b, StringComparison.OrdinalIgnoreCase)).ToList();
         if (ag.Count == 0 || bg.Count == 0)
         {
             await FollowupAsync("One or both authors not found.");
@@ -432,21 +454,21 @@ public class ThunderstoreSlash : AppModuleBase
         }
 
         int sum(List<PackageInfo> g) => g.Sum(m => m.versions?.Sum(v => v.downloads) ?? 0);
-        int med(List<PackageInfo> g) => (int)g.Select(m => m.versions?.Sum(v => v.downloads) ?? 0).OrderBy(x => x).DefaultIfEmpty().ElementAt(g.Count / 2);
+        int med(List<PackageInfo> g) => g.Select(m => m.versions?.Sum(v => v.downloads) ?? 0).OrderBy(x => x).DefaultIfEmpty().ElementAt(g.Count / 2);
 
-        var ea = new EmbedBuilder().WithTitle($"Author: {a}")
+        Embed? ea = new EmbedBuilder().WithTitle($"Author: {a}")
             .AddField("Mods", ag.Count, true).AddField("Total DL", sum(ag).ToString("N0"), true)
             .AddField("Median DL", med(ag).ToString("N0"), true)
             .AddField("Top 5", string.Join("\n", ag.OrderByDescending(m => m.versions?.Sum(v => v.downloads) ?? 0).Take(5).Select(m => $"[{m.name}]({m.package_url})")), false)
             .WithColor(Color.DarkGreen).Build();
 
-        var eb = new EmbedBuilder().WithTitle($"Author: {b}")
+        Embed? eb = new EmbedBuilder().WithTitle($"Author: {b}")
             .AddField("Mods", bg.Count, true).AddField("Total DL", sum(bg).ToString("N0"), true)
             .AddField("Median DL", med(bg).ToString("N0"), true)
             .AddField("Top 5", string.Join("\n", bg.OrderByDescending(m => m.versions?.Sum(v => v.downloads) ?? 0).Take(5).Select(m => $"[{m.name}]({m.package_url})")), false)
             .WithColor(Color.DarkBlue).Build();
 
-        await SendEmbedsPagedAsync(new[] { ea, eb });
+        await SendEmbedsPagedAsync([ea, eb]);
     }
 
 
@@ -459,7 +481,7 @@ public class ThunderstoreSlash : AppModuleBase
         limit = Math.Clamp(limit, 1, 25);
         await DeferIfNeeded(ephemeral);
 
-        var map = await ThunderstoreAPI.GetAuthorsWithAtLeastFiveMods();
+        Dictionary<string, AuthorStats>? map = await ThunderstoreAPI.GetAuthorsWithAtLeastFiveMods();
         if (map == null || map.Count == 0)
         {
             await FollowupAsync("No authors meet the criteria.");
@@ -468,7 +490,7 @@ public class ThunderstoreSlash : AppModuleBase
 
         // Get the global median downloads from the first author (since it's the same on all authors)
         int currentHighest = map.First().Value.global_median_downloads;
-        var fields = map
+        IEnumerable<(string Name, string Value, bool Inline)> fields = map
             .OrderByDescending(kv => kv.Value.medianDownloadsMultiplied)
             .Take(limit)
             .Select(kv => (
@@ -477,9 +499,9 @@ public class ThunderstoreSlash : AppModuleBase
                 Inline: true
             ));
 
-        var header = "Top authors with at least 5 mods:\n **Global Median Downloads:** " + currentHighest + "\n\n";
+        string header = "Top authors with at least 5 mods:\n **Global Median Downloads:** " + currentHighest + "\n\n";
 
-        var embeds = Chunk.BuildPagedEmbeds("Mod Author Leaderboard", header, fields, Color.Gold);
+        IEnumerable<Embed> embeds = Chunk.BuildPagedEmbeds("Mod Author Leaderboard", header, fields, Color.Gold);
         await SendEmbedsPagedAsync(embeds);
     }
 
@@ -494,20 +516,19 @@ public class ThunderstoreSlash : AppModuleBase
         [Summary("include_deprecated", "Include Deprecated mods?")]
         bool deprecated = true)
     {
-        //top = Math.Clamp(top, 1, 20);
         await DeferIfNeeded(ephemeral);
 
-        var stats = await DiscordBot.ThunderstoreAPI.GetAuthorStats(author);
+        AuthorStats? stats = await ThunderstoreAPI.GetAuthorStats(author);
         if (stats == null || stats.mods_count == 0)
         {
             await FollowupAsync("Author not found or has no mods.");
             return;
         }
 
-        var topLines = stats.topModsSorted.Where(x => deprecated ? x.is_deprecated || !x.is_deprecated : !x.is_deprecated).Take(top).Select((m, i) =>
+        IEnumerable<string> topLines = stats.topModsSorted.Where(x => deprecated ? x.is_deprecated || !x.is_deprecated : !x.is_deprecated).Take(top).Select((m, i) =>
             $"{i + 1}. [{m.name}]({m.package_url}) — {m.versions?.Sum(v => v.downloads):N0} downloads");
 
-        var desc =
+        string desc =
             $"**Mods:** {stats.mods_count:N0}\n" +
             $"**Total Downloads:** {stats.total_downloads:N0}\n" +
             $"**Average:** {stats.average_downloads:N0}\n" +
@@ -516,7 +537,7 @@ public class ThunderstoreSlash : AppModuleBase
             $"**Most Downloaded:** {stats.most_downloaded_mod}\n\n" +
             $"**Top Mods:**\n{string.Join("\n", topLines)}";
 
-        var embeds = Chunk.BuildDescriptionEmbeds($"Stats for {author}", desc, Color.Gold);
+        IEnumerable<Embed> embeds = Chunk.BuildDescriptionEmbeds($"Stats for {author}", desc, Color.Gold);
         await SendEmbedsPagedAsync(embeds);
     }
 
@@ -534,14 +555,14 @@ public class ThunderstoreSlash : AppModuleBase
         limit = Math.Clamp(limit, 1, 50);
         await DeferIfNeeded(ephemeral);
 
-        var mods = await ThunderstoreAPI.GetModsByAuthor(author);
+        List<PackageInfo>? mods = await ThunderstoreAPI.GetModsByAuthor(author);
         if (mods == null || mods.Count == 0)
         {
             await FollowupAsync("Author not found or has no mods.");
             return;
         }
 
-        var filtered = mods
+        IEnumerable<(string? Name, string Value, bool Inline)> filtered = mods
             .Where(m => includeModpacks
                         || (!m.name.Contains("modpack", StringComparison.OrdinalIgnoreCase) && !m.categories.Contains("Modpacks")))
             .OrderByDescending(m => m.versions?.Sum(v => v.downloads) ?? 0)
@@ -552,7 +573,7 @@ public class ThunderstoreSlash : AppModuleBase
                 Inline: true
             ));
 
-        var embeds = Chunk.BuildPagedEmbeds($"Top Mods by {author}", $"Limit: {limit} • Include Modpacks: {includeModpacks}", filtered, Color.Gold);
+        IEnumerable<Embed> embeds = Chunk.BuildPagedEmbeds($"Top Mods by {author}", $"Limit: {limit} • Include Modpacks: {includeModpacks}", filtered, Color.Gold);
         await SendEmbedsPagedAsync(embeds);
     }
 
@@ -570,7 +591,7 @@ public class ThunderstoreSlash : AppModuleBase
         limit = Math.Clamp(limit, 1, 50);
         await DeferIfNeeded(ephemeral);
 
-        var all = await ThunderstoreAPI.GetAllModsFromThunderstore();
+        List<PackageInfo>? all = await ThunderstoreAPI.GetAllModsFromThunderstore();
         if (all == null || all.Count == 0)
         {
             await FollowupAsync("No packages available.");
@@ -581,7 +602,7 @@ public class ThunderstoreSlash : AppModuleBase
         string authorPat = "*", namePat = "*";
         if (query.Contains('/'))
         {
-            var parts = query.Split('/', 2, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            string[] parts = query.Split('/', 2, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             authorPat = parts.ElementAtOrDefault(0) ?? "*";
             namePat = parts.ElementAtOrDefault(1) ?? "*";
         }
@@ -593,11 +614,11 @@ public class ThunderstoreSlash : AppModuleBase
         bool Like(string text, string pat)
         {
             // very small wildcard matcher: * means any, case-insensitive
-            var p = "^" + System.Text.RegularExpressions.Regex.Escape(pat).Replace("\\*", ".*") + "$";
+            string p = "^" + System.Text.RegularExpressions.Regex.Escape(pat).Replace("\\*", ".*") + "$";
             return System.Text.RegularExpressions.Regex.IsMatch(text ?? "", p, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         }
 
-        var filtered = all
+        IEnumerable<(string Name, string Value, bool Inline)> filtered = all
             .Where(m => includeModpacks || (!m.name.Contains("modpack", StringComparison.OrdinalIgnoreCase) && !m.categories.Contains("Modpacks")))
             .Where(m => Like(m.owner, authorPat) && Like(m.name, namePat))
             .Take(limit)
@@ -607,7 +628,7 @@ public class ThunderstoreSlash : AppModuleBase
                 Inline: true
             ));
 
-        var embeds = Chunk.BuildPagedEmbeds("Search Results", $"Query: `{query}` • Limit: {limit}", filtered, Color.DarkGreen);
+        IEnumerable<Embed> embeds = Chunk.BuildPagedEmbeds("Search Results", $"Query: `{query}` • Limit: {limit}", filtered, Color.DarkGreen);
         await SendEmbedsPagedAsync(embeds);
     }
 
@@ -620,8 +641,8 @@ public class ThunderstoreSlash : AppModuleBase
     {
         await DeferIfNeeded(ephemeral);
 
-        var mods = await ThunderstoreAPI.GetModsByAuthor(author);
-        var dep = mods?
+        List<PackageInfo>? mods = await ThunderstoreAPI.GetModsByAuthor(author);
+        List<(string? name, string, bool)>? dep = mods?
             .Where(m => m.is_deprecated)
             .Select(m => (m.name, $"[More Info]({m.package_url})", true))
             .ToList();
@@ -632,7 +653,7 @@ public class ThunderstoreSlash : AppModuleBase
             return;
         }
 
-        var embeds = Chunk.BuildPagedEmbeds($"Deprecated by {author}", "Marked deprecated on Thunderstore", dep, Color.Red);
+        IEnumerable<Embed> embeds = Chunk.BuildPagedEmbeds($"Deprecated by {author}", "Marked deprecated on Thunderstore", dep, Color.Red);
         await SendEmbedsPagedAsync(embeds);
     }
 
@@ -647,22 +668,22 @@ public class ThunderstoreSlash : AppModuleBase
     {
         await DeferIfNeeded(ephemeral);
 
-        var pkg = await Api.GetPackageInfo(author, name);
+        ExperimentalPackageInfo? pkg = await Api.GetPackageInfo(author, name);
         if (string.IsNullOrWhiteSpace(pkg?.name))
         {
             await FollowupAsync("Package not found.");
             return;
         }
 
-        var deps = pkg.latest?.dependencies ?? new();
+        List<string> deps = pkg.latest?.dependencies ?? [];
         if (deps.Count == 0)
         {
             await FollowupAsync("This package has no dependencies.");
             return;
         }
 
-        var text = string.Join("\n", deps);
-        var embeds = Chunk.BuildDescriptionEmbeds($"{pkg.name} — Dependencies", text, Color.Purple);
+        string text = string.Join("\n", deps);
+        IEnumerable<Embed> embeds = Chunk.BuildDescriptionEmbeds($"{pkg.name} — Dependencies", text, Color.Purple);
         await SendEmbedsPagedAsync(embeds);
     }
 
@@ -679,7 +700,7 @@ public class ThunderstoreSlash : AppModuleBase
         limit = Math.Clamp(limit, 1, 50);
         await DeferIfNeeded(ephemeral);
 
-        var all = await ThunderstoreAPI.GetAllModsFromThunderstore();
+        List<PackageInfo>? all = await ThunderstoreAPI.GetAllModsFromThunderstore();
         if (all == null || all.Count == 0)
         {
             await FollowupAsync("No packages available.");
@@ -687,9 +708,9 @@ public class ThunderstoreSlash : AppModuleBase
         }
 
         // Dependency strings look like "Author-Name-x.y.z" — we match the prefix "Author-Name-"
-        var prefix = $"{author}-{name}-";
+        string prefix = $"{author}-{name}-";
 
-        var rows = all
+        IEnumerable<(string Name, string Value, bool Inline)> rows = all
             .Where(m => m.versions?.Any(v => v.dependencies?.Any(d => d.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) == true) == true)
             .OrderByDescending(m => m.versions?.Sum(v => v.downloads) ?? 0)
             .Take(limit)
@@ -699,7 +720,7 @@ public class ThunderstoreSlash : AppModuleBase
                 Inline: true
             ));
 
-        var embeds = Chunk.BuildPagedEmbeds($"Dependents of {author}/{name}", $"Limit: {limit}", rows, Color.Teal);
+        IEnumerable<Embed> embeds = Chunk.BuildPagedEmbeds($"Dependents of {author}/{name}", $"Limit: {limit}", rows, Color.Teal);
         await SendEmbedsPagedAsync(embeds);
     }
 
@@ -717,17 +738,17 @@ public class ThunderstoreSlash : AppModuleBase
         limit = Math.Clamp(limit, 1, 50);
         await DeferIfNeeded(ephemeral);
 
-        var since = DateTime.UtcNow.AddDays(-days);
-        var mods = await ThunderstoreAPI.GetAllModsFromThunderstore();
+        DateTime since = DateTime.UtcNow.AddDays(-days);
+        List<PackageInfo> mods = await ThunderstoreAPI.GetAllModsFromThunderstore();
 
-        var rising = mods
+        IEnumerable<(string? name, string, bool)> rising = mods
             .Where(m => includeModpacks || (!m.name.Contains("modpack", StringComparison.OrdinalIgnoreCase) && !m.categories.Contains("Modpacks")))
-            .Where(m => DateTime.TryParse(m.date_created, out var dc) && dc >= since)
+            .Where(m => DateTime.TryParse(m.date_created, out DateTime dc) && dc >= since)
             .OrderByDescending(m => m.versions?.Sum(v => v.downloads) ?? 0)
             .Take(limit)
             .Select(m => (m.name, $"Since created: {(m.versions?.Sum(v => v.downloads) ?? 0):N0} downloads\n[More Info]({m.package_url})", true));
 
-        var embeds = Chunk.BuildPagedEmbeds($"Rising (last {days} days)", $"Limit: {limit} • Include Modpacks: {includeModpacks}", rising, Color.Orange);
+        IEnumerable<Embed> embeds = Chunk.BuildPagedEmbeds($"Rising (last {days} days)", $"Limit: {limit} • Include Modpacks: {includeModpacks}", rising, Color.Orange);
         await SendEmbedsPagedAsync(embeds);
     }
 
@@ -745,12 +766,12 @@ public class ThunderstoreSlash : AppModuleBase
         limit = Math.Clamp(limit, 1, 50);
         await DeferIfNeeded(ephemeral);
 
-        var cutoff = DateTime.UtcNow.AddDays(-days);
-        var mods = await ThunderstoreAPI.GetAllModsFromThunderstore();
+        DateTime cutoff = DateTime.UtcNow.AddDays(-days);
+        List<PackageInfo> mods = await ThunderstoreAPI.GetAllModsFromThunderstore();
 
-        var stale = mods
+        IEnumerable<(string? Name, string Value, bool Inline)> stale = mods
             .Where(m => includeModpacks || (!m.name.Contains("modpack", StringComparison.OrdinalIgnoreCase) && !m.categories.Contains("Modpacks")))
-            .Where(m => DateTime.TryParse(m.date_updated, out var du) && du < cutoff)
+            .Where(m => DateTime.TryParse(m.date_updated, out DateTime du) && du < cutoff)
             .OrderByDescending(m => m.versions?.Sum(v => v.downloads) ?? 0)
             .Take(limit)
             .Select(m => (
@@ -758,7 +779,7 @@ public class ThunderstoreSlash : AppModuleBase
                 Value: $"Last updated: {TryDate(m.date_updated)}\nTotal Downloads: {m.versions?.Sum(v => v.downloads) ?? 0:N0}\n[More Info]({m.package_url})",
                 Inline: true));
 
-        var embeds = Chunk.BuildPagedEmbeds($"Stale (>{days} days old)", $"Limit: {limit} • Include Modpacks: {includeModpacks}", stale, Color.DarkRed);
+        IEnumerable<Embed> embeds = Chunk.BuildPagedEmbeds($"Stale (>{days} days old)", $"Limit: {limit} • Include Modpacks: {includeModpacks}", stale, Color.DarkRed);
         await SendEmbedsPagedAsync(embeds);
     }
 
@@ -775,8 +796,8 @@ public class ThunderstoreSlash : AppModuleBase
         limit = Math.Clamp(limit, 1, 50);
         await DeferIfNeeded(ephemeral);
 
-        var mods = await ThunderstoreAPI.GetAllModsFromThunderstore();
-        var filtered = mods.Where(m => !m.is_pinned && (includeModpacks || (!m.name.Contains("modpack", StringComparison.OrdinalIgnoreCase) && !m.categories.Contains("Modpacks"))))
+        List<PackageInfo> mods = await ThunderstoreAPI.GetAllModsFromThunderstore();
+        List<PackageInfo> filtered = mods.Where(m => !m.is_pinned && (includeModpacks || (!m.name.Contains("modpack", StringComparison.OrdinalIgnoreCase) && !m.categories.Contains("Modpacks"))))
             .OrderByDescending(m => m.versions.Sum(v => v.downloads))
             .Take(limit)
             .ToList();
@@ -787,12 +808,12 @@ public class ThunderstoreSlash : AppModuleBase
             return;
         }
 
-        var fields = filtered.Select(m =>
+        IEnumerable<(string? Name, string Value, bool Inline)> fields = filtered.Select(m =>
             (Name: m.name,
                 Value: $"Total Downloads: {m.versions.Sum(v => v.downloads):N0}\n[More Info]({m.package_url})",
                 Inline: true));
 
-        var embeds = Chunk.BuildPagedEmbeds("Most Popular Mods", $"Limit: {limit} • Include Modpacks: {includeModpacks}", fields, Color.Gold);
+        IEnumerable<Embed> embeds = Chunk.BuildPagedEmbeds("Most Popular Mods", $"Limit: {limit} • Include Modpacks: {includeModpacks}", fields, Color.Gold);
         await SendEmbedsPagedAsync(embeds);
     }
 
@@ -807,21 +828,21 @@ public class ThunderstoreSlash : AppModuleBase
     {
         await DeferIfNeeded(ephemeral);
 
-        var pkg = await Api.GetPackageInfo(author, package);
+        ExperimentalPackageInfo? pkg = await Api.GetPackageInfo(author, package);
         if (string.IsNullOrWhiteSpace(pkg?.name))
         {
             await FollowupAsync("Package not found.");
             return;
         }
 
-        var main = new EmbedBuilder()
+        Embed? main = new EmbedBuilder()
             .WithTitle($"{pkg.name} by {pkg.owner}")
             .WithDescription(pkg.latest?.description ?? "")
             .AddField("Created", TryDate(pkg.date_created), true)
             .AddField("Updated", TryDate(pkg.date_updated), true)
             .AddField("Latest Version", pkg.latest?.version_number ?? "N/A", true)
             .AddField("Website", string.IsNullOrWhiteSpace(pkg.latest?.website_url) ? "—" : pkg.latest.website_url, true)
-            .AddField("Thunderstore", $"https://thunderstore.io/c/valheim/p/{author}/{package}/")
+            .AddField("Thunderstore", $"{ThunderstoreAPI.BaseTsUrl}c/valheim/p/{author}/{package}/")
             .WithThumbnailUrl(pkg.latest?.icon)
             .WithColor(Color.Purple)
             .Build();
@@ -829,14 +850,14 @@ public class ThunderstoreSlash : AppModuleBase
         IEnumerable<Embed> embeds;
         if (pkg.latest?.dependencies != null && pkg.latest.dependencies.Count > 0)
         {
-            var depsText = string.Join("\n", pkg.latest.dependencies);
-            var depEmbeds = new List<Embed> { main };
+            string depsText = string.Join("\n", pkg.latest.dependencies);
+            List<Embed> depEmbeds = [main];
             depEmbeds.AddRange(Chunk.BuildDescriptionEmbeds("Dependencies", depsText, Color.Purple));
             embeds = depEmbeds;
         }
         else
         {
-            embeds = new[] { main };
+            embeds = [main];
         }
 
         await SendEmbedsPagedAsync(embeds);
@@ -852,8 +873,8 @@ public class ThunderstoreSlash : AppModuleBase
         limit = Math.Clamp(limit, 1, 25);
         await DeferIfNeeded(ephemeral);
 
-        var mods = await ThunderstoreAPI.GetAllModsFromThunderstore();
-        var since = DateTime.UtcNow.AddDays(-1);
+        List<PackageInfo> mods = await ThunderstoreAPI.GetAllModsFromThunderstore();
+        DateTime since = DateTime.UtcNow.AddDays(-1);
 
         var recent = mods.Where(m => !m.is_pinned && !m.name.Contains("modpack", StringComparison.OrdinalIgnoreCase) && !m.categories.Contains("Modpacks"))
             .Select(m => new
@@ -872,8 +893,8 @@ public class ThunderstoreSlash : AppModuleBase
             return;
         }
 
-        var fields = recent.Select(x => (x.name, $"Downloads today: {x.Downloads:N0}\n[More Info]({x.package_url})", true));
-        var embeds = Chunk.BuildPagedEmbeds("Top Download Growth (Today)", $"Since {since:u}", fields, Color.Purple);
+        IEnumerable<(string? name, string, bool)> fields = recent.Select(x => (x.name, $"Downloads today: {x.Downloads:N0}\n[More Info]({x.package_url})", true));
+        IEnumerable<Embed> embeds = Chunk.BuildPagedEmbeds("Top Download Growth (Today)", $"Since {since:u}", fields, Color.Purple);
         await SendEmbedsPagedAsync(embeds);
     }
 
@@ -888,14 +909,14 @@ public class ThunderstoreSlash : AppModuleBase
         limit = Math.Clamp(limit, 1, 25);
         await DeferIfNeeded(ephemeral);
 
-        var mods = await ThunderstoreAPI.GetAllModsFromThunderstore();
-        var list = mods
+        List<PackageInfo> mods = await ThunderstoreAPI.GetAllModsFromThunderstore();
+        IEnumerable<(string? name, string, bool)> list = mods
             .Where(m => includeModpacks || (!m.name.Contains("modpack", StringComparison.OrdinalIgnoreCase) && !(m.categories?.Contains("Modpacks") ?? false)))
             .OrderByDescending(m => m.versions?.Count ?? 0)
             .Take(limit)
             .Select(m => (m.name, $"Versions: {m.versions?.Count ?? 0}\n[More Info]({m.package_url})", true));
 
-        var embeds = Chunk.BuildPagedEmbeds("Mod with Most Versions", $"Limit: {limit}", list, Color.Purple);
+        IEnumerable<Embed> embeds = Chunk.BuildPagedEmbeds("Mod with Most Versions", $"Limit: {limit}", list, Color.Purple);
         await SendEmbedsPagedAsync(embeds);
     }
 
@@ -908,14 +929,14 @@ public class ThunderstoreSlash : AppModuleBase
         limit = Math.Clamp(limit, 1, 50);
         await DeferIfNeeded(ephemeral);
 
-        var mods = await ThunderstoreAPI.GetAllModsFromThunderstore();
-        var list = mods
+        List<PackageInfo> mods = await ThunderstoreAPI.GetAllModsFromThunderstore();
+        IEnumerable<(string? name, string, bool)> list = mods
             .Where(m => m.is_deprecated)
-            .OrderByDescending(m => DateTime.TryParse(m.date_updated, out var du) ? du : DateTime.MinValue)
+            .OrderByDescending(m => DateTime.TryParse(m.date_updated, out DateTime du) ? du : DateTime.MinValue)
             .Take(limit)
             .Select(m => (m.name, $"Updated: {TryDate(m.date_updated)} • [More Info]({m.package_url})", true));
 
-        var embeds = Chunk.BuildPagedEmbeds("Deprecated Mods (Recently Updated)", $"Limit: {limit}", list, Color.DarkRed);
+        IEnumerable<Embed> embeds = Chunk.BuildPagedEmbeds("Deprecated Mods (Recently Updated)", $"Limit: {limit}", list, Color.DarkRed);
         await SendEmbedsPagedAsync(embeds);
     }
 
@@ -928,39 +949,38 @@ public class ThunderstoreSlash : AppModuleBase
     {
         await DeferIfNeeded(ephemeral);
 
-        var mods = await ThunderstoreAPI.GetModsByAuthor(author) ?? new List<PackageInfo>();
+        List<PackageInfo> mods = await ThunderstoreAPI.GetModsByAuthor(author) ?? [];
         if (mods.Count == 0)
         {
             await FollowupAsync("Author not found or has no mods.");
             return;
         }
 
-        var start = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1).AddMonths(-11);
-        var months = Enumerable.Range(0, 12).Select(i => start.AddMonths(i)).ToList();
+        DateTime start = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1).AddMonths(-11);
+        List<DateTime> months = Enumerable.Range(0, 12).Select(i => start.AddMonths(i)).ToList();
 
-        int Upld(DateTime dt) => (dt >= start) ? 1 : 0;
-        var uploads = new int[12];
-        var updates = new int[12];
+        int[] uploads = new int[12];
+        int[] updates = new int[12];
 
-        foreach (var m in mods)
+        foreach (PackageInfo m in mods)
         {
-            if (DateTime.TryParse(m.date_created, out var dc))
+            if (DateTime.TryParse(m.date_created, out DateTime dc))
             {
-                var idx = (dc.Year - start.Year) * 12 + (dc.Month - start.Month);
-                if (idx is >= 0 and < 12) uploads[idx]++;
+                int idx = (dc.Year - start.Year) * 12 + (dc.Month - start.Month);
+                if (idx is >= 0 and < 12) ++uploads[idx];
             }
 
-            if (DateTime.TryParse(m.date_updated, out var du))
+            if (!DateTime.TryParse(m.date_updated, out DateTime du)) continue;
             {
-                var idx = (du.Year - start.Year) * 12 + (du.Month - start.Month);
-                if (idx is >= 0 and < 12) updates[idx]++;
+                int idx = (du.Year - start.Year) * 12 + (du.Month - start.Month);
+                if (idx is >= 0 and < 12) ++updates[idx];
             }
         }
 
-        var lines = months.Select((m, i) => $"{m:yyyy-MM}: uploads {uploads[i]}, updates {updates[i]}");
-        var desc = string.Join("\n", lines);
+        IEnumerable<string> lines = months.Select((m, i) => $"{m:yyyy-MM}: uploads {uploads[i]}, updates {updates[i]}");
+        string desc = string.Join("\n", lines);
 
-        var embeds = Chunk.BuildDescriptionEmbeds($"Activity for {author}", desc, Color.DarkGrey);
+        IEnumerable<Embed> embeds = Chunk.BuildDescriptionEmbeds($"Activity for {author}", desc, Color.DarkGrey);
         await SendEmbedsPagedAsync(embeds);
     }
 
@@ -977,75 +997,76 @@ public class ThunderstoreSlash : AppModuleBase
         depth = Math.Clamp(depth, 1, 5);
         await DeferIfNeeded(ephemeral);
 
-        var all = await ThunderstoreAPI.GetAllModsFromThunderstore();
-        var pkg = all.FirstOrDefault(p => p.owner.Equals(author, StringComparison.OrdinalIgnoreCase) && p.name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        List<PackageInfo> all = await ThunderstoreAPI.GetAllModsFromThunderstore();
+        PackageInfo? pkg = all.FirstOrDefault(p => p.owner.Equals(author, StringComparison.OrdinalIgnoreCase) && p.name.Equals(name, StringComparison.OrdinalIgnoreCase));
         if (pkg == null)
         {
             await FollowupAsync("Package not found.");
             return;
         }
 
-        VersionInfo? LatestVersion(PackageInfo p) =>
-            (p.versions ?? new List<VersionInfo>())
-            .OrderByDescending(v => DateTime.TryParse(v.date_created, out var dt) ? dt : DateTime.MinValue)
-            .ThenByDescending(v => v.version_number)
-            .FirstOrDefault();
-
-        var latest = LatestVersion(pkg);
-        var latestDeps = latest?.dependencies ?? new List<string>();
+        VersionInfo? latest = LatestVersion(pkg);
+        List<string> latestDeps = latest?.dependencies ?? [];
         if (latestDeps.Count == 0)
         {
             await FollowupAsync("This package has no dependencies.");
             return;
         }
 
-        string MapKey(string owner, string nm) => $"{owner}/{nm}".ToLowerInvariant();
-        var map = all
+        Dictionary<string, PackageInfo> map = all
             .Where(p => !string.IsNullOrWhiteSpace(p.owner) && !string.IsNullOrWhiteSpace(p.name))
             .GroupBy(p => MapKey(p.owner!, p.name!), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(
                 g => g.Key,
-                g => g.OrderByDescending(m => DateTime.TryParse(m.date_updated, out var du) ? du : DateTime.MinValue)
-                    .ThenByDescending(m => DateTime.TryParse(m.date_created, out var dc) ? dc : DateTime.MinValue)
+                g => g.OrderByDescending(m => DateTime.TryParse(m.date_updated, out DateTime du) ? du : DateTime.MinValue)
+                    .ThenByDescending(m => DateTime.TryParse(m.date_created, out DateTime dc) ? dc : DateTime.MinValue)
                     .First(),
                 StringComparer.OrdinalIgnoreCase);
+
+        StringBuilder sb = new();
+        HashSet<string> visited = new(StringComparer.OrdinalIgnoreCase);
+
+        sb.AppendLine($"{author}/{name}");
+        Walk(latestDeps, 1);
+
+        IEnumerable<Embed> embeds = Chunk.BuildDescriptionEmbeds($"{author}/{name} — Dependencies (depth {depth})", sb.ToString(), Color.DarkTeal);
+        await SendEmbedsPagedAsync(embeds);
+        return;
 
         (string owner, string pkg) ParseDep(string dep)
         {
             // "Author-Name-x.y.z" -> owner, name
-            var parts = dep.Split('-', 3);
-            if (parts.Length < 2) return ("", "");
-            return (parts[0], parts[1]);
+            string[] parts = dep.Split('-', 3);
+            return parts.Length < 2 ? ("", "") : (parts[0], parts[1]);
         }
-
-        var sb = new System.Text.StringBuilder();
-        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         void Walk(IEnumerable<string> deps, int d)
         {
             if (deps == null || d > depth) return;
-            foreach (var dep in deps)
+            foreach (string dep in deps)
             {
-                var (own, nm) = ParseDep(dep);
+                (string own, string nm) = ParseDep(dep);
                 if (string.IsNullOrWhiteSpace(own) || string.IsNullOrWhiteSpace(nm)) continue;
-                var key = MapKey(own, nm);
+                string key = MapKey(own, nm);
                 if (!visited.Add(key)) continue;
 
                 sb.AppendLine($"{new string(' ', (d - 1) * 2)}• {own}/{nm}");
-                if (map.TryGetValue(key, out var child))
+                if (map.TryGetValue(key, out PackageInfo? child))
                 {
-                    var childLatest = LatestVersion(child);
-                    var childDeps = childLatest?.dependencies ?? new List<string>();
+                    VersionInfo? childLatest = LatestVersion(child);
+                    List<string> childDeps = childLatest?.dependencies ?? [];
                     Walk(childDeps, d + 1);
                 }
             }
         }
 
-        sb.AppendLine($"{author}/{name}");
-        Walk(latestDeps, 1);
+        string MapKey(string owner, string nm) => $"{owner}/{nm}".ToLowerInvariant();
 
-        var embeds = Chunk.BuildDescriptionEmbeds($"{author}/{name} — Dependencies (depth {depth})", sb.ToString(), Color.DarkTeal);
-        await SendEmbedsPagedAsync(embeds);
+        VersionInfo? LatestVersion(PackageInfo p) =>
+            (p.versions ?? [])
+            .OrderByDescending(v => DateTime.TryParse(v.date_created, out DateTime dt) ? dt : DateTime.MinValue)
+            .ThenByDescending(v => v.version_number)
+            .FirstOrDefault();
     }
 
     [SlashCommand("nsfwmods", "List mods marked NSFW.")]
@@ -1057,14 +1078,14 @@ public class ThunderstoreSlash : AppModuleBase
         limit = Math.Clamp(limit, 1, 50);
         await DeferIfNeeded(ephemeral);
 
-        var mods = await ThunderstoreAPI.GetAllModsFromThunderstore();
-        var list = mods
+        List<PackageInfo> mods = await ThunderstoreAPI.GetAllModsFromThunderstore();
+        IEnumerable<(string? name, string, bool)> list = mods
             .Where(m => m.has_nsfw_content)
             .OrderByDescending(m => m.versions?.Sum(v => v.downloads) ?? 0)
             .Take(limit)
             .Select(m => (m.name, $"[More Info]({m.package_url})", true));
 
-        var embeds = Chunk.BuildPagedEmbeds("NSFW Mods", $"Limit: {limit}", list, Color.DarkRed);
+        IEnumerable<Embed> embeds = Chunk.BuildPagedEmbeds("NSFW Mods", $"Limit: {limit}", list, Color.DarkRed);
         await SendEmbedsPagedAsync(embeds);
     }
 
@@ -1081,20 +1102,20 @@ public class ThunderstoreSlash : AppModuleBase
         limit = Math.Clamp(limit, 1, 50);
         await DeferIfNeeded(ephemeral);
 
-        var mods = await ThunderstoreAPI.GetAllModsFromThunderstore();
-        var list = mods
+        List<PackageInfo> mods = await ThunderstoreAPI.GetAllModsFromThunderstore();
+        IEnumerable<(string? name, string, bool)> list = mods
             .Where(m => includeModpacks || (!m.name.Contains("modpack", StringComparison.OrdinalIgnoreCase) && !(m.categories?.Contains("Modpacks") ?? false)))
-            .Where(m => (m.categories ?? new List<string>()).Contains(category, StringComparer.OrdinalIgnoreCase))
+            .Where(m => (m.categories ?? []).Contains(category, StringComparer.OrdinalIgnoreCase))
             .OrderByDescending(m => m.versions?.Sum(v => v.downloads) ?? 0)
             .Take(limit)
             .Select(m => (m.name, $"Downloads: {m.versions?.Sum(v => v.downloads) ?? 0:N0}\n[More Info]({m.package_url})", true));
 
-        var embeds = Chunk.BuildPagedEmbeds($"Mods in Category: {category}", $"Limit: {limit}", list, Color.Teal);
+        IEnumerable<Embed> embeds = Chunk.BuildPagedEmbeds($"Mods in Category: {category}", $"Limit: {limit}", list, Color.Teal);
         await SendEmbedsPagedAsync(embeds);
     }
 
     private async Task SendEmbedsPagedEmbedsAsync(IEnumerable<Embed> embeds) => await SendEmbedsPagedAsync(embeds);
 
 
-    private static string TryDate(string? iso) => DateTime.TryParse(iso, out var dt) ? dt.ToShortDateString() : "—";
+    private static string TryDate(string? iso) => DateTime.TryParse(iso, out DateTime dt) ? dt.ToShortDateString() : "—";
 }

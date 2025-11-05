@@ -1,9 +1,6 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using Discord;
+﻿using Discord;
 
-namespace DiscordBot;
+namespace ThunderstoreStats_DiscordBot;
 
 public static class DiscordLimits
 {
@@ -21,7 +18,7 @@ public class Chunking
     public IReadOnlyList<string> ChunkText(string text, int limit = DiscordLimits.MaxMessage)
     {
         if (string.IsNullOrEmpty(text)) return new List<string> { "" };
-        var parts = new List<string>();
+        List<string> parts = [];
         int i = 0;
         while (i < text.Length)
         {
@@ -44,7 +41,7 @@ public class Chunking
         if (text.Length <= budget) return text;
 
         const string fence = "```";
-        var trimmed = text[..Math.Max(0, budget - 5)];
+        string trimmed = text[..Math.Max(0, budget - 5)];
         // If we opened a code fence in the excerpt, try to close it for neatness.
         bool hasFence = trimmed.Contains(fence);
         return hasFence ? trimmed + "\n```…```" : trimmed + " …";
@@ -63,12 +60,11 @@ public class Chunking
         int currentLen = (current.Title?.Length ?? 0) + (current.Description?.Length ?? 0);
         int fieldCount = 0;
 
-        foreach (var (Name, Value, Inline) in fields)
+        foreach ((var Name, var Value, bool Inline) in fields)
         {
-            var safeName = Trunc(Name ?? "", DiscordLimits.MaxFieldName);
-            var safeValue = Trunc(Value ?? "", DiscordLimits.MaxFieldValue);
+            string safeName = Trunc(Name ?? "", DiscordLimits.MaxFieldName);
+            string safeValue = Trunc(Value ?? "", DiscordLimits.MaxFieldValue);
 
-            // Predict new totals if we add this field now
             int predictedLen = currentLen + safeName.Length + safeValue.Length;
             bool tooManyFields = fieldCount >= DiscordLimits.MaxEmbedFields;
             bool tooLargeTotal = predictedLen >= DiscordLimits.MaxEmbedTotal;
@@ -84,19 +80,18 @@ public class Chunking
 
             current.AddField(safeName, safeValue, Inline);
             currentLen += safeName.Length + safeValue.Length;
-            fieldCount++;
+            ++fieldCount;
         }
 
         yield return current.Build();
 
-        static EmbedBuilder NewPage(string t, string d, Color c) =>
-            new EmbedBuilder().WithTitle(t).WithDescription(d).WithColor(c);
+        static EmbedBuilder NewPage(string t, string d, Color c) => new EmbedBuilder().WithTitle(t).WithDescription(d).WithColor(c);
     }
 
     public IEnumerable<Embed> BuildDescriptionEmbeds(string title, string longText, Color color)
     {
         title = Trunc(title, DiscordLimits.MaxEmbedTitle);
-        foreach (var chunk in ChunkText(longText, DiscordLimits.MaxEmbedDescription))
+        foreach (string chunk in ChunkText(longText, DiscordLimits.MaxEmbedDescription))
         {
             yield return new EmbedBuilder().WithTitle(title).WithDescription(chunk).WithColor(color).Build();
         }
@@ -107,8 +102,8 @@ public class Chunking
         title = Trunc(title, DiscordLimits.MaxEmbedTitle);
         header = Trunc(header, DiscordLimits.MaxEmbedDescription);
 
-        var glue = string.IsNullOrWhiteSpace(header) ? body : header + "\n\n" + body;
-        foreach (var chunk in ChunkText(glue, DiscordLimits.MaxEmbedDescription))
+        string glue = string.IsNullOrWhiteSpace(header) ? body : header + "\n\n" + body;
+        foreach (string chunk in ChunkText(glue, DiscordLimits.MaxEmbedDescription))
         {
             yield return new EmbedBuilder().WithTitle(title).WithDescription(chunk).WithColor(color).Build();
         }

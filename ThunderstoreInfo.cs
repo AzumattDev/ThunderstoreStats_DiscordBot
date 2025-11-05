@@ -1,4 +1,4 @@
-﻿namespace DiscordBot;
+﻿namespace ThunderstoreStats_DiscordBot;
 
 public class VersionInfo
 {
